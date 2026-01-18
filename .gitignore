@@ -1,0 +1,40 @@
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Go
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+vendor/
+
+# Node.js
+node_modules/
+dist/
+.env
+.env.local
+.env.*.local
+
+# R
+.Rhistory
+.Rdata
+.RData
+.Ruserdata
+
+# Logs
+*.log
+npm-debug.log*
+
+# Temp
+tmp/
+temp/
