@@ -1,0 +1,138 @@
+version: '3.8'
+
+services:
+  # PROCESSING Module
+  processing:
+    build:
+      context: ./PROCESSING
+      dockerfile: Dockerfile
+    container_name: pandora-processing
+    ports:
+      - "8081:8081"
+    environment:
+      - ENV=development
+      - NCBI_API_KEY=${NCBI_API_KEY:-}
+      - CONTROL_API_URL=http://control:8080
+      - CONTROL_API_KEY=${CONTROL_API_KEY:-}
+    volumes:
+      - processing-data:/data/processing
+      - processing-output:/data/output
+    depends_on:
+      - control
+    networks:
+      - pandora-network
+    restart: unless-stopped
+
+  # CONTROL Module (placeholder)
+  control:
+    build:
+      context: ./CONTROL
+      dockerfile: Dockerfile
+    container_name: pandora-control
+    ports:
+      - "8080:8080"
+    environment:
+      - ENV=development
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_NAME=pandora
+      - DB_USER=pandora
+      - DB_PASSWORD=${DB_PASSWORD:-pandora123}
+      - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672/
+      - JWT_SECRET=${JWT_SECRET:-your-super-secret-key}
+    depends_on:
+      - postgres
+      - rabbitmq
+    networks:
+      - pandora-network
+    restart: unless-stopped
+
+  # ANALYSIS Module (placeholder)
+  analysis:
+    build:
+      context: ./ANALYSIS
+      dockerfile: Dockerfile
+    container_name: pandora-analysis
+    ports:
+      - "8082:8082"
+    environment:
+      - ENV=development
+      - CONTROL_API_URL=http://control:8080
+    volumes:
+      - analysis-data:/data/analysis
+      - analysis-results:/data/results
+    depends_on:
+      - control
+    networks:
+      - pandora-network
+    restart: unless-stopped
+
+  # OPERATION Module (placeholder)
+  operation:
+    build:
+      context: ./OPERATION
+      dockerfile: Dockerfile
+    container_name: pandora-operation
+    ports:
+      - "3000:80"
+    environment:
+      - VITE_API_URL=http://localhost:8080/api/v1
+    depends_on:
+      - control
+    networks:
+      - pandora-network
+    restart: unless-stopped
+
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15-alpine
+    container_name: pandora-postgres
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_DB=pandora
+      - POSTGRES_USER=pandora
+      - POSTGRES_PASSWORD=${DB_PASSWORD:-pandora123}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks:
+      - pandora-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pandora"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # RabbitMQ Message Queue
+  rabbitmq:
+    image: rabbitmq:3.12-management-alpine
+    container_name: pandora-rabbitmq
+    ports:
+      - "5672:5672"
+      - "15672:15672"  # Management UI
+    environment:
+      - RABBITMQ_DEFAULT_USER=guest
+      - RABBITMQ_DEFAULT_PASS=guest
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+    networks:
+      - pandora-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "check_running"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+networks:
+  pandora-network:
+    driver: bridge
+
+volumes:
+  postgres-data:
+  rabbitmq-data:
+  processing-data:
+  processing-output:
+  analysis-data:
+  analysis-results:

@@ -1,0 +1,39 @@
+# PROCESSING Module Configuration
+
+server:
+  port: 8081
+  read_timeout: 30s
+  write_timeout: 30s
+
+scraper:
+  ncbi:
+    base_url: "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
+    api_key: ""  # Set via NCBI_API_KEY env var
+    rate_limit: 3  # requests per second (10 with API key)
+    timeout: 30s
+    max_retries: 3
+    retry_delay: 1s
+
+trimmomatic:
+  jar_path: "/opt/trimmomatic/trimmomatic.jar"
+  adapters_path: "/opt/trimmomatic/adapters"
+  threads: 4
+  leading: 3
+  trailing: 3
+  sliding_window: "4:15"
+  min_len: 36
+
+etl:
+  batch_size: 1000
+  retry_attempts: 3
+  worker_count: 4
+
+control:
+  url: "http://control:8080"
+  timeout: 30s
+  api_key: ""  # Set via CONTROL_API_KEY env var
+
+directories:
+  data: "/data/processing"
+  temp: "/tmp/processing"
+  output: "/data/output"
