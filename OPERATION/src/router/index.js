@@ -39,6 +39,12 @@ const routes = [
     meta: { requiresAuth: true }
   },
   {
+    path: '/sra-download',
+    name: 'sra-download',
+    component: () => import('@/views/SRADownloadView.vue'),
+    meta: { requiresAuth: true }
+  },
+  {
     path: '/jobs',
     name: 'jobs',
     component: () => import('@/views/JobsView.vue'),
