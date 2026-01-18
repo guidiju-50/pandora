@@ -22,10 +22,10 @@ type Client struct {
 
 // Config holds HTTP client configuration.
 type Config struct {
-	Timeout     time.Duration
-	RateLimit   int           // requests per second
-	MaxRetries  int
-	RetryDelay  time.Duration
+	Timeout    time.Duration
+	RateLimit  int // requests per second
+	MaxRetries int
+	RetryDelay time.Duration
 }
 
 // NewClient creates a new HTTP client with the given configuration.

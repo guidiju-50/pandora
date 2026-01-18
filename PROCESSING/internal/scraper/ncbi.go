@@ -17,9 +17,9 @@ import (
 
 // NCBIScraper handles scraping data from NCBI databases.
 type NCBIScraper struct {
-	client  *httpclient.Client
-	config  config.NCBIConfig
-	logger  *zap.Logger
+	client *httpclient.Client
+	config config.NCBIConfig
+	logger *zap.Logger
 }
 
 // NewNCBIScraper creates a new NCBI scraper.

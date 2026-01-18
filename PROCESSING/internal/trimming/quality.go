@@ -131,21 +131,21 @@ func (qc *QualityChecker) analyze(reader io.Reader) (*models.QualityMetrics, err
 // CompareQuality compares quality metrics before and after trimming.
 func (qc *QualityChecker) CompareQuality(before, after *models.QualityMetrics) *QualityComparison {
 	return &QualityComparison{
-		ReadRetention:     float64(after.TotalReads) / float64(before.TotalReads) * 100,
-		BaseRetention:     float64(after.TotalBases) / float64(before.TotalBases) * 100,
+		ReadRetention:      float64(after.TotalReads) / float64(before.TotalReads) * 100,
+		BaseRetention:      float64(after.TotalBases) / float64(before.TotalBases) * 100,
 		QualityImprovement: after.MeanQuality - before.MeanQuality,
-		Q30Improvement:    after.Q30Percentage - before.Q30Percentage,
-		Before:            before,
-		After:             after,
+		Q30Improvement:     after.Q30Percentage - before.Q30Percentage,
+		Before:             before,
+		After:              after,
 	}
 }
 
 // QualityComparison holds the comparison between before and after quality metrics.
 type QualityComparison struct {
-	ReadRetention      float64              `json:"read_retention"`
-	BaseRetention      float64              `json:"base_retention"`
-	QualityImprovement float64              `json:"quality_improvement"`
-	Q30Improvement     float64              `json:"q30_improvement"`
+	ReadRetention      float64                `json:"read_retention"`
+	BaseRetention      float64                `json:"base_retention"`
+	QualityImprovement float64                `json:"quality_improvement"`
+	Q30Improvement     float64                `json:"q30_improvement"`
 	Before             *models.QualityMetrics `json:"before"`
 	After              *models.QualityMetrics `json:"after"`
 }

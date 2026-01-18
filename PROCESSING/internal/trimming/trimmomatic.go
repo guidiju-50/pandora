@@ -34,26 +34,26 @@ func NewTrimmomatic(cfg config.TrimmoConfig, logger *zap.Logger) *Trimmomatic {
 
 // Options holds options for a trimming run.
 type Options struct {
-	InputFile1  string // Forward reads (or single-end reads)
-	InputFile2  string // Reverse reads (empty for single-end)
-	OutputDir   string
-	Leading     int    // Quality threshold for leading bases
-	Trailing    int    // Quality threshold for trailing bases
+	InputFile1    string // Forward reads (or single-end reads)
+	InputFile2    string // Reverse reads (empty for single-end)
+	OutputDir     string
+	Leading       int    // Quality threshold for leading bases
+	Trailing      int    // Quality threshold for trailing bases
 	SlidingWindow string // Window size:quality threshold
-	MinLen      int    // Minimum read length
-	Threads     int
-	AdapterFile string // Path to adapter file
+	MinLen        int    // Minimum read length
+	Threads       int
+	AdapterFile   string // Path to adapter file
 }
 
 // Result holds the result of a trimming operation.
 type Result struct {
-	InputReads     int64
-	OutputReads    int64
-	DroppedReads   int64
-	SurvivalRate   float64
-	OutputFiles    []string
-	LogFile        string
-	Duration       time.Duration
+	InputReads   int64
+	OutputReads  int64
+	DroppedReads int64
+	SurvivalRate float64
+	OutputFiles  []string
+	LogFile      string
+	Duration     time.Duration
 }
 
 // Run executes Trimmomatic with the given options.
@@ -79,7 +79,7 @@ func (t *Trimmomatic) Run(ctx context.Context, opts Options) (*Result, error) {
 
 	// Execute command
 	cmd := exec.CommandContext(ctx, "java", args...)
-	
+
 	// Capture stderr for parsing results
 	stderr, err := cmd.StderrPipe()
 	if err != nil {

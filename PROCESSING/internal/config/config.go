@@ -31,12 +31,12 @@ type ScraperConfig struct {
 
 // NCBIConfig holds NCBI API configuration.
 type NCBIConfig struct {
-	APIKey      string        `mapstructure:"api_key"`
-	BaseURL     string        `mapstructure:"base_url"`
-	RateLimit   int           `mapstructure:"rate_limit"`
-	Timeout     time.Duration `mapstructure:"timeout"`
-	MaxRetries  int           `mapstructure:"max_retries"`
-	RetryDelay  time.Duration `mapstructure:"retry_delay"`
+	APIKey     string        `mapstructure:"api_key"`
+	BaseURL    string        `mapstructure:"base_url"`
+	RateLimit  int           `mapstructure:"rate_limit"`
+	Timeout    time.Duration `mapstructure:"timeout"`
+	MaxRetries int           `mapstructure:"max_retries"`
+	RetryDelay time.Duration `mapstructure:"retry_delay"`
 }
 
 // TrimmoConfig holds Trimmomatic configuration.

@@ -46,11 +46,11 @@ type TransformResult struct {
 
 // TransformedRecord represents a record after transformation.
 type TransformedRecord struct {
-	Original    *models.SRARecord
-	Validated   bool
-	Normalized  bool
-	Enriched    bool
-	Metadata    map[string]string
+	Original   *models.SRARecord
+	Validated  bool
+	Normalized bool
+	Enriched   bool
+	Metadata   map[string]string
 }
 
 // Extract fetches data from the source database.
