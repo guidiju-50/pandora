@@ -18,15 +18,16 @@ COPY . .
 # Build the application
 RUN CGO_ENABLED=0 GOOS=linux go build -o /processing ./cmd/processing
 
-# Runtime stage
-FROM openjdk:17-slim
+# Runtime stage - using Eclipse Temurin (recommended OpenJDK distribution)
+FROM eclipse-temurin:17-jre-jammy
 
 WORKDIR /app
 
 # Install dependencies
-RUN apt-get update && apt-get install -y \
+RUN apt-get update && apt-get install -y --no-install-recommends \
     wget \
     unzip \
+    ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Trimmomatic
