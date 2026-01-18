@@ -45,7 +45,7 @@ func main() {
 	pipeline := etl.NewPipeline(cfg.ETL, ncbiScraper, loader, logger)
 	trimmomatic := trimming.NewTrimmomatic(cfg.Trimmomatic, logger)
 	qualityChecker := trimming.NewQualityChecker(logger)
-	
+
 	// Initialize SRA downloader
 	sraDownloader := download.NewSRADownloader(download.Config{
 		OutputDir:   getEnvOrDefault("OUTPUT_DIR", "/data/output"),
@@ -344,11 +344,8 @@ func handleDownload(logger *zap.Logger, downloader *download.SRADownloader) gin.
 			var result *download.DownloadResult
 			var err error
 
-			if req.UsePrefetch {
-				result, err = downloader.DownloadWithPrefetch(ctx, acc)
-			} else {
-				result, err = downloader.Download(ctx, acc)
-			}
+			// Use SmartDownload which automatically falls back to ENA if SRA Toolkit is unavailable
+			result, err = downloader.SmartDownload(ctx, acc)
 
 			if err != nil {
 				logger.Warn("download failed", zap.String("accession", acc), zap.Error(err))
@@ -389,15 +386,8 @@ func handleFullPipeline(
 		ctx := c.Request.Context()
 		logger.Info("starting full pipeline", zap.String("accession", req.Accession))
 
-		// Step 1: Download
-		var downloadResult *download.DownloadResult
-		var err error
-
-		if req.UsePrefetch {
-			downloadResult, err = downloader.DownloadWithPrefetch(ctx, req.Accession)
-		} else {
-			downloadResult, err = downloader.Download(ctx, req.Accession)
-		}
+		// Step 1: Download (SmartDownload automatically uses best available method)
+		downloadResult, err := downloader.SmartDownload(ctx, req.Accession)
 
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{
@@ -454,9 +444,9 @@ func handleFullPipeline(
 		}
 
 		c.JSON(http.StatusOK, gin.H{
-			"status":            "completed",
-			"download":          downloadResult,
-			"trimming":          trimResult.ToModel(),
+			"status":             "completed",
+			"download":           downloadResult,
+			"trimming":           trimResult.ToModel(),
 			"quality_comparison": comparison,
 		})
 	}
