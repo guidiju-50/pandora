@@ -1,0 +1,43 @@
+# ANALYSIS Module Configuration
+
+server:
+  port: 8082
+  read_timeout: 30s
+  write_timeout: 300s  # Long timeout for analysis jobs
+
+quantification:
+  default_tool: kallisto
+  threads: 8
+  
+  rsem:
+    path: /opt/rsem
+    bowtie2_path: /opt/bowtie2/bin
+    
+  kallisto:
+    path: /opt/kallisto/kallisto
+    bootstrap: 100
+    
+  salmon:
+    path: /opt/salmon/bin/salmon
+
+r:
+  path: /usr/bin/Rscript
+  libs_path: /usr/local/lib/R/site-library
+  scripts_path: ./r_scripts
+  timeout: 3600s
+  memory_limit: 8G
+
+analysis:
+  pvalue_threshold: 0.05
+  log2fc_threshold: 1.0
+  min_count_filter: 10
+
+control:
+  url: http://control:8080
+  timeout: 30s
+  api_key: ""
+
+directories:
+  data: /data/analysis
+  results: /data/results
+  temp: /tmp/analysis
