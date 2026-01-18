@@ -13,6 +13,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/guidiju-50/pandora/PROCESSING/internal/config"
+	"github.com/guidiju-50/pandora/PROCESSING/internal/download"
 	"github.com/guidiju-50/pandora/PROCESSING/internal/etl"
 	"github.com/guidiju-50/pandora/PROCESSING/internal/scraper"
 	"github.com/guidiju-50/pandora/PROCESSING/internal/trimming"
@@ -44,9 +45,18 @@ func main() {
 	pipeline := etl.NewPipeline(cfg.ETL, ncbiScraper, loader, logger)
 	trimmomatic := trimming.NewTrimmomatic(cfg.Trimmomatic, logger)
 	qualityChecker := trimming.NewQualityChecker(logger)
+	
+	// Initialize SRA downloader
+	sraDownloader := download.NewSRADownloader(download.Config{
+		OutputDir:   getEnvOrDefault("OUTPUT_DIR", "/data/output"),
+		TempDir:     getEnvOrDefault("TEMP_DIR", "/tmp/processing"),
+		FasterqDump: getEnvOrDefault("FASTERQ_DUMP", "fasterq-dump"),
+		Prefetch:    getEnvOrDefault("PREFETCH", "prefetch"),
+		Threads:     4,
+	}, logger)
 
 	// Create HTTP server
-	router := setupRouter(logger, pipeline, trimmomatic, qualityChecker)
+	router := setupRouter(logger, pipeline, trimmomatic, qualityChecker, sraDownloader)
 
 	server := &http.Server{
 		Addr:         fmt.Sprintf(":%d", cfg.Server.Port),
@@ -101,12 +111,21 @@ func initLogger() *zap.Logger {
 	return logger
 }
 
+// getEnvOrDefault gets environment variable or returns default.
+func getEnvOrDefault(key, defaultValue string) string {
+	if value := os.Getenv(key); value != "" {
+		return value
+	}
+	return defaultValue
+}
+
 // setupRouter configures the HTTP router.
 func setupRouter(
 	logger *zap.Logger,
 	pipeline *etl.Pipeline,
 	trimmomatic *trimming.Trimmomatic,
 	qualityChecker *trimming.QualityChecker,
+	sraDownloader *download.SRADownloader,
 ) *gin.Engine {
 	// Set Gin mode based on environment
 	if os.Getenv("ENV") == "production" {
@@ -133,8 +152,10 @@ func setupRouter(
 		jobs := api.Group("/jobs")
 		{
 			jobs.POST("/scrape", handleScrape(logger, pipeline))
+			jobs.POST("/download", handleDownload(logger, sraDownloader))
 			jobs.POST("/process", handleProcess(logger, trimmomatic, qualityChecker))
 			jobs.POST("/etl", handleETL(logger, pipeline))
+			jobs.POST("/full-pipeline", handleFullPipeline(logger, sraDownloader, trimmomatic, qualityChecker))
 		}
 
 		// Quality check
@@ -298,6 +319,145 @@ func handleETL(logger *zap.Logger, pipeline *etl.Pipeline) gin.HandlerFunc {
 
 		c.JSON(http.StatusOK, gin.H{
 			"status": "completed",
+		})
+	}
+}
+
+// DownloadRequest represents an SRR download request.
+type DownloadRequest struct {
+	Accessions  []string `json:"accessions" binding:"required"`
+	UsePrefetch bool     `json:"use_prefetch"`
+}
+
+func handleDownload(logger *zap.Logger, downloader *download.SRADownloader) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		var req DownloadRequest
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+
+		ctx := c.Request.Context()
+		results := make([]*download.DownloadResult, 0, len(req.Accessions))
+
+		for _, acc := range req.Accessions {
+			var result *download.DownloadResult
+			var err error
+
+			if req.UsePrefetch {
+				result, err = downloader.DownloadWithPrefetch(ctx, acc)
+			} else {
+				result, err = downloader.Download(ctx, acc)
+			}
+
+			if err != nil {
+				logger.Warn("download failed", zap.String("accession", acc), zap.Error(err))
+			}
+			results = append(results, result)
+		}
+
+		c.JSON(http.StatusOK, gin.H{
+			"status":  "completed",
+			"results": results,
+		})
+	}
+}
+
+// FullPipelineRequest represents a full pipeline request (download + process).
+type FullPipelineRequest struct {
+	Accession     string `json:"accession" binding:"required"`
+	UsePrefetch   bool   `json:"use_prefetch"`
+	Leading       int    `json:"leading"`
+	Trailing      int    `json:"trailing"`
+	SlidingWindow string `json:"sliding_window"`
+	MinLen        int    `json:"min_len"`
+}
+
+func handleFullPipeline(
+	logger *zap.Logger,
+	downloader *download.SRADownloader,
+	trimmomatic *trimming.Trimmomatic,
+	qc *trimming.QualityChecker,
+) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		var req FullPipelineRequest
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+
+		ctx := c.Request.Context()
+		logger.Info("starting full pipeline", zap.String("accession", req.Accession))
+
+		// Step 1: Download
+		var downloadResult *download.DownloadResult
+		var err error
+
+		if req.UsePrefetch {
+			downloadResult, err = downloader.DownloadWithPrefetch(ctx, req.Accession)
+		} else {
+			downloadResult, err = downloader.Download(ctx, req.Accession)
+		}
+
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error": fmt.Sprintf("download failed: %v", err),
+				"step":  "download",
+			})
+			return
+		}
+
+		if len(downloadResult.Files) == 0 {
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error": "no FASTQ files generated",
+				"step":  "download",
+			})
+			return
+		}
+
+		// Step 2: Quality check before trimming
+		beforeQuality, _ := qc.AnalyzeFile(downloadResult.Files[0])
+
+		// Step 3: Trimmomatic processing
+		outputDir := downloadResult.OutputDir + "/trimmed"
+		opts := trimming.Options{
+			InputFile1:    downloadResult.Files[0],
+			OutputDir:     outputDir,
+			Leading:       req.Leading,
+			Trailing:      req.Trailing,
+			SlidingWindow: req.SlidingWindow,
+			MinLen:        req.MinLen,
+		}
+
+		// Check if paired-end
+		if len(downloadResult.Files) > 1 {
+			opts.InputFile2 = downloadResult.Files[1]
+		}
+
+		trimResult, err := trimmomatic.Run(ctx, opts)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error":    fmt.Sprintf("trimmomatic failed: %v", err),
+				"step":     "trimming",
+				"download": downloadResult,
+			})
+			return
+		}
+
+		// Step 4: Quality check after trimming
+		var comparison *trimming.QualityComparison
+		if beforeQuality != nil && len(trimResult.OutputFiles) > 0 {
+			afterQuality, err := qc.AnalyzeFile(trimResult.OutputFiles[0])
+			if err == nil {
+				comparison = qc.CompareQuality(beforeQuality, afterQuality)
+			}
+		}
+
+		c.JSON(http.StatusOK, gin.H{
+			"status":            "completed",
+			"download":          downloadResult,
+			"trimming":          trimResult.ToModel(),
+			"quality_comparison": comparison,
 		})
 	}
 }

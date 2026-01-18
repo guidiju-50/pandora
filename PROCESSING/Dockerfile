@@ -28,7 +28,24 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     wget \
     unzip \
     ca-certificates \
+    curl \
+    pigz \
     && rm -rf /var/lib/apt/lists/*
+
+# Install SRA Toolkit
+ARG SRA_VERSION=3.1.1
+RUN cd /tmp && \
+    wget -q https://ftp-trace.ncbi.nlm.nih.gov/sra/sdk/${SRA_VERSION}/sratoolkit.${SRA_VERSION}-ubuntu64.tar.gz && \
+    tar -xzf sratoolkit.${SRA_VERSION}-ubuntu64.tar.gz && \
+    mv sratoolkit.${SRA_VERSION}-ubuntu64 /opt/sratoolkit && \
+    rm sratoolkit.${SRA_VERSION}-ubuntu64.tar.gz && \
+    ln -s /opt/sratoolkit/bin/* /usr/local/bin/
+
+# Configure SRA Toolkit
+RUN mkdir -p /root/.ncbi && \
+    echo '/LIBS/IMAGE_GUID = "0"' > /root/.ncbi/user-settings.mkfg && \
+    echo '/libs/cloud/report_instance_identity = "false"' >> /root/.ncbi/user-settings.mkfg && \
+    vdb-config --restore-defaults
 
 # Install Trimmomatic
 RUN wget -q http://www.usadellab.org/cms/uploads/supplementary/Trimmomatic/Trimmomatic-0.39.zip \
