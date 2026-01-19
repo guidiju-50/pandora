@@ -1,7 +1,8 @@
 <script setup>
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useJobsStore } from '@/store/jobs'
-import { getAllJobs } from '@/services/processing'
+import { getAllJobs, cancelJob } from '@/services/processing'
+import { cancelPipelineJob, getAllPipelineJobs } from '@/services/analysis'
 
 const jobsStore = useJobsStore()
 
@@ -85,6 +86,28 @@ function formatDate(date) {
     minute: '2-digit'
   })
 }
+
+// Cancel a job
+async function handleCancelJob(job) {
+  try {
+    if (job.source === 'processing') {
+      await cancelJob(job.id)
+    } else {
+      // Try to cancel as pipeline job
+      await cancelPipelineJob(job.id)
+    }
+    
+    // Refresh the jobs list
+    fetchProcessingJobs()
+  } catch (e) {
+    console.error('Failed to cancel job:', e)
+  }
+}
+
+// Check if job can be cancelled
+function canCancelJob(job) {
+  return job.status === 'pending' || job.status === 'running'
+}
 </script>
 
 <template>
@@ -157,6 +180,19 @@ function formatDate(date) {
           <span class="badge" :class="getStatusClass(job.status)">{{ job.status }}</span>
           <span v-if="job.source === 'processing'" class="source-badge">PROCESSING</span>
           <span class="job-date">{{ formatDate(job.created_at) }}</span>
+          <button 
+            v-if="canCancelJob(job)"
+            class="btn btn--danger btn--sm btn--cancel"
+            @click.stop="handleCancelJob(job)"
+            title="Cancel this job"
+          >
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <circle cx="12" cy="12" r="10"></circle>
+              <line x1="15" y1="9" x2="9" y2="15"></line>
+              <line x1="9" y1="9" x2="15" y2="15"></line>
+            </svg>
+            Cancel
+          </button>
         </div>
 
         <div v-if="job.status === 'running' || job.status === 'pending'" class="job-progress">
@@ -403,5 +439,39 @@ function formatDate(date) {
 .badge--warning {
   background: rgba(245, 158, 11, 0.2);
   color: #f59e0b;
+}
+
+.btn--cancel {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.25rem 0.5rem;
+  font-size: 0.7rem;
+  background: rgba(239, 68, 68, 0.15);
+  color: #ef4444;
+  border: 1px solid rgba(239, 68, 68, 0.3);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+  
+  &:hover {
+    background: rgba(239, 68, 68, 0.25);
+    border-color: rgba(239, 68, 68, 0.5);
+  }
+  
+  svg {
+    flex-shrink: 0;
+  }
+}
+
+.btn--sm {
+  padding: 0.25rem 0.5rem;
+  font-size: 0.7rem;
+}
+
+.btn--danger {
+  background: rgba(239, 68, 68, 0.15);
+  color: #ef4444;
+  border: 1px solid rgba(239, 68, 68, 0.3);
 }
 </style>

@@ -179,6 +179,7 @@ func setupRouter(
 			pipelineGroup.GET("/jobs", handleListPipelineJobs(logger, orchestrator))
 			pipelineGroup.GET("/jobs/:id", handleGetPipelineJob(logger, orchestrator))
 			pipelineGroup.GET("/jobs/:id/progress", handlePipelineProgress(logger, orchestrator))
+			pipelineGroup.POST("/jobs/:id/cancel", handleCancelPipelineJob(logger, orchestrator))
 		}
 	}
 
@@ -678,6 +679,32 @@ func handleGetPipelineJob(logger *zap.Logger, orchestrator *pipeline.Orchestrato
 			return
 		}
 		c.JSON(http.StatusOK, job)
+	}
+}
+
+func handleCancelPipelineJob(logger *zap.Logger, orchestrator *pipeline.Orchestrator) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		jobID := c.Param("id")
+		
+		if orchestrator.CancelJob(jobID) {
+			logger.Info("pipeline job cancelled", zap.String("job_id", jobID))
+			c.JSON(http.StatusOK, gin.H{
+				"status":  "cancelled",
+				"job_id":  jobID,
+				"message": "Pipeline job cancelled successfully",
+			})
+		} else {
+			job, found := orchestrator.GetJob(jobID)
+			if !found {
+				c.JSON(http.StatusNotFound, gin.H{"error": "job not found"})
+				return
+			}
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error":   "cannot cancel job",
+				"status":  job.Status,
+				"message": "Job is already completed, failed, or cancelled",
+			})
+		}
 	}
 }
 

@@ -4,6 +4,7 @@ import { searchSRA } from '@/services/processing'
 import { 
   startCompletePipeline, 
   getPipelineJob, 
+  cancelPipelineJob,
   listOrganisms 
 } from '@/services/analysis'
 
@@ -193,6 +194,44 @@ function getOrganismName(key) {
   const org = organisms.value.find(o => o.name === key)
   return org?.scientific_name || key
 }
+
+// Cancel a job
+async function handleCancelJob(jobId) {
+  try {
+    await cancelPipelineJob(jobId)
+    
+    // Update local job state
+    const jobIndex = activeJobs.value.findIndex(j => j.id === jobId)
+    if (jobIndex !== -1) {
+      activeJobs.value[jobIndex].status = 'cancelled'
+      activeJobs.value[jobIndex].stage = 'Cancelled'
+      activeJobs.value[jobIndex].message = 'Job cancelled by user'
+    }
+    
+    // Stop polling for this job
+    // Check if all jobs are done
+    const allDone = activeJobs.value.every(
+      j => j.status === 'completed' || j.status === 'failed' || j.status === 'cancelled'
+    )
+    if (allDone) {
+      loading.value = false
+    }
+  } catch (e) {
+    console.error('Failed to cancel job:', e)
+    error.value = e.response?.data?.error || 'Failed to cancel job'
+  }
+}
+
+// Cancel all active jobs
+async function handleCancelAll() {
+  const runningJobs = activeJobs.value.filter(
+    j => j.status === 'pending' || j.status === 'running'
+  )
+  
+  for (const job of runningJobs) {
+    await handleCancelJob(job.id)
+  }
+}
 </script>
 
 <template>
@@ -367,7 +406,21 @@ function getOrganismName(key) {
 
     <!-- Active Jobs with Progress -->
     <div v-if="activeJobs.length > 0" class="active-jobs-section">
-      <h3>Pipeline Jobs</h3>
+      <div class="section-header">
+        <h3>Pipeline Jobs</h3>
+        <button 
+          v-if="activeJobs.some(j => j.status === 'pending' || j.status === 'running')"
+          class="btn btn--danger btn--sm"
+          @click="handleCancelAll"
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
+            <line x1="9" y1="9" x2="15" y2="15"></line>
+            <line x1="15" y1="9" x2="9" y2="15"></line>
+          </svg>
+          Cancel All
+        </button>
+      </div>
       <div class="jobs-list">
         <div v-for="job in activeJobs" :key="job.id" class="job-card" :class="'job-' + job.status">
           <div class="job-header">
@@ -375,16 +428,32 @@ function getOrganismName(key) {
               <span class="accession">{{ job.accession }}</span>
               <span class="organism">{{ getOrganismName(job.organism) }}</span>
             </div>
-            <span 
-              class="badge" 
-              :class="{
-                'badge--warning': job.status === 'pending' || job.status === 'running',
-                'badge--success': job.status === 'completed',
-                'badge--danger': job.status === 'failed'
-              }"
-            >
-              {{ job.status }}
-            </span>
+            <div class="job-actions">
+              <span 
+                class="badge" 
+                :class="{
+                  'badge--warning': job.status === 'pending' || job.status === 'running',
+                  'badge--success': job.status === 'completed',
+                  'badge--danger': job.status === 'failed',
+                  'badge--muted': job.status === 'cancelled'
+                }"
+              >
+                {{ job.status }}
+              </span>
+              <button 
+                v-if="job.status === 'pending' || job.status === 'running'"
+                class="btn btn--danger btn--sm btn--cancel"
+                @click.stop="handleCancelJob(job.id)"
+                title="Cancel this job"
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <circle cx="12" cy="12" r="10"></circle>
+                  <line x1="15" y1="9" x2="9" y2="15"></line>
+                  <line x1="9" y1="9" x2="15" y2="15"></line>
+                </svg>
+                Cancel
+              </button>
+            </div>
           </div>
           
           <!-- Progress Bar -->
@@ -893,5 +962,59 @@ function getOrganismName(key) {
 .badge--warning {
   background: rgba(245, 158, 11, 0.2);
   color: #f59e0b;
+}
+
+.badge--muted {
+  background: rgba(107, 114, 128, 0.2);
+  color: #9ca3af;
+}
+
+.section-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 1rem;
+}
+
+.job-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.btn--cancel {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.375rem 0.75rem;
+  font-size: 0.75rem;
+  
+  svg {
+    flex-shrink: 0;
+  }
+}
+
+.btn--danger {
+  background: rgba(239, 68, 68, 0.15);
+  color: #ef4444;
+  border: 1px solid rgba(239, 68, 68, 0.3);
+  
+  &:hover {
+    background: rgba(239, 68, 68, 0.25);
+    border-color: rgba(239, 68, 68, 0.5);
+  }
+}
+
+.btn--sm {
+  padding: 0.375rem 0.75rem;
+  font-size: 0.75rem;
+}
+
+.job-cancelled {
+  opacity: 0.7;
+  
+  .progress-fill {
+    background: linear-gradient(90deg, #6b7280, #9ca3af);
+  }
 }
 </style>

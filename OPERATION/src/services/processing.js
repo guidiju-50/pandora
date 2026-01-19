@@ -62,6 +62,16 @@ export async function getAllJobs() {
 }
 
 /**
+ * Cancel a job
+ * @param {string} jobId - Job ID
+ * @returns {Promise} Cancellation result
+ */
+export async function cancelJob(jobId) {
+  const response = await processingApi.post(`/jobs/${jobId}/cancel`)
+  return response.data
+}
+
+/**
  * Subscribe to job progress updates via SSE
  * @param {string} jobId - Job ID
  * @param {Function} onProgress - Callback for progress updates

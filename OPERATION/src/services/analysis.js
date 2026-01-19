@@ -55,6 +55,16 @@ export async function getAllPipelineJobs() {
 }
 
 /**
+ * Cancel a pipeline job
+ * @param {string} jobId - Pipeline job ID
+ * @returns {Promise} Cancellation result
+ */
+export async function cancelPipelineJob(jobId) {
+  const response = await analysisApi.post(`/pipeline/jobs/${jobId}/cancel`)
+  return response.data
+}
+
+/**
  * Poll pipeline job until complete
  * @param {string} jobId - Job ID
  * @param {Function} onProgress - Progress callback
@@ -177,6 +187,7 @@ export default {
   startCompletePipeline,
   getPipelineJob,
   getAllPipelineJobs,
+  cancelPipelineJob,
   pollPipelineUntilComplete,
   listOrganisms,
   ensureIndex,

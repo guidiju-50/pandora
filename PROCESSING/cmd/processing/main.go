@@ -159,6 +159,7 @@ func setupRouter(
 		api.GET("/jobs", handleListJobs(jobManager))
 		api.GET("/jobs/:id", handleGetJob(jobManager))
 		api.GET("/jobs/:id/progress", handleJobProgress(jobManager))
+		api.POST("/jobs/:id/cancel", handleCancelJob(jobManager))
 
 		// Job actions
 		jobsGroup := api.Group("/jobs")
@@ -528,6 +529,32 @@ func handleGetJob(jobManager *jobs.Manager) gin.HandlerFunc {
 			return
 		}
 		c.JSON(http.StatusOK, job)
+	}
+}
+
+// handleCancelJob cancels a running or pending job.
+func handleCancelJob(jobManager *jobs.Manager) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		id := c.Param("id")
+		
+		if jobManager.CancelJob(id) {
+			c.JSON(http.StatusOK, gin.H{
+				"status":  "cancelled",
+				"job_id":  id,
+				"message": "Job cancelled successfully",
+			})
+		} else {
+			job, ok := jobManager.GetJob(id)
+			if !ok {
+				c.JSON(http.StatusNotFound, gin.H{"error": "job not found"})
+				return
+			}
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error":  "cannot cancel job",
+				"status": job.Status,
+				"message": "Job is already completed, failed, or cancelled",
+			})
+		}
 	}
 }
 

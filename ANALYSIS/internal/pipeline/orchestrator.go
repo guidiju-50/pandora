@@ -26,6 +26,7 @@ const (
 	StatusRunning    JobStatus = "running"
 	StatusCompleted  JobStatus = "completed"
 	StatusFailed     JobStatus = "failed"
+	StatusCancelled  JobStatus = "cancelled"
 )
 
 // PipelineJob represents a complete pipeline job.
@@ -68,13 +69,14 @@ type PipelineOutput struct {
 
 // Orchestrator coordinates the complete pipeline.
 type Orchestrator struct {
-	processingURL  string
+	processingURL    string
 	referenceManager *reference.Manager
-	kallisto       *quantify.Kallisto
-	matrixGen      *quantify.MatrixGenerator
-	jobs           sync.Map
-	outputDir      string
-	logger         *zap.Logger
+	kallisto         *quantify.Kallisto
+	matrixGen        *quantify.MatrixGenerator
+	jobs             sync.Map
+	cancelFuncs      sync.Map // map[string]context.CancelFunc
+	outputDir        string
+	logger           *zap.Logger
 }
 
 // NewOrchestrator creates a new pipeline orchestrator.
@@ -113,8 +115,15 @@ func (o *Orchestrator) StartPipeline(ctx context.Context, input PipelineInput) (
 	o.jobs.Store(jobID, job)
 	o.logger.Info("pipeline job created", zap.String("job_id", jobID), zap.String("accession", input.Accession))
 
+	// Create cancellable context and store cancel function
+	pipelineCtx, cancel := context.WithCancel(context.Background())
+	o.cancelFuncs.Store(jobID, cancel)
+
 	// Run pipeline asynchronously
-	go o.runPipeline(context.Background(), job)
+	go func() {
+		defer o.cancelFuncs.Delete(jobID)
+		o.runPipeline(pipelineCtx, job)
+	}()
 
 	return jobID, nil
 }
@@ -135,6 +144,40 @@ func (o *Orchestrator) ListJobs() []*PipelineJob {
 		return true
 	})
 	return jobs
+}
+
+// CancelJob cancels a running or pending pipeline job.
+func (o *Orchestrator) CancelJob(jobID string) bool {
+	jobValue, ok := o.jobs.Load(jobID)
+	if !ok {
+		return false
+	}
+
+	job := jobValue.(*PipelineJob)
+
+	// Can only cancel pending or running jobs
+	if job.Status != StatusPending && job.Status != StatusRunning {
+		return false
+	}
+
+	// Call cancel function if exists
+	if cancelValue, ok := o.cancelFuncs.Load(jobID); ok {
+		if cancel, ok := cancelValue.(context.CancelFunc); ok {
+			cancel()
+		}
+		o.cancelFuncs.Delete(jobID)
+	}
+
+	// Update job status
+	now := time.Now()
+	job.Status = StatusCancelled
+	job.Stage = "Cancelled"
+	job.Message = "Job cancelled by user"
+	job.CompletedAt = &now
+	o.jobs.Store(jobID, job)
+
+	o.logger.Info("pipeline job cancelled", zap.String("job_id", jobID))
+	return true
 }
 
 // runPipeline executes the complete pipeline.

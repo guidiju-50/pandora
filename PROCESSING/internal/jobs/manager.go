@@ -17,6 +17,7 @@ const (
 	StatusRunning   Status = "running"
 	StatusCompleted Status = "completed"
 	StatusFailed    Status = "failed"
+	StatusCancelled Status = "cancelled"
 )
 
 // Job represents an async processing job.
@@ -45,6 +46,7 @@ type ProgressUpdate struct {
 // Manager handles async job execution and tracking.
 type Manager struct {
 	jobs        map[string]*Job
+	cancelFuncs map[string]context.CancelFunc
 	subscribers map[string][]chan ProgressUpdate
 	mu          sync.RWMutex
 }
@@ -53,6 +55,7 @@ type Manager struct {
 func NewManager() *Manager {
 	return &Manager{
 		jobs:        make(map[string]*Job),
+		cancelFuncs: make(map[string]context.CancelFunc),
 		subscribers: make(map[string][]chan ProgressUpdate),
 	}
 }
@@ -173,7 +176,55 @@ func (m *Manager) FailJob(id string, err error) {
 			Status:   StatusFailed,
 		})
 		m.closeSubscribers(id)
+		delete(m.cancelFuncs, id)
 	}
+}
+
+// CancelJob cancels a running job.
+func (m *Manager) CancelJob(id string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	job, ok := m.jobs[id]
+	if !ok {
+		return false
+	}
+
+	// Can only cancel pending or running jobs
+	if job.Status != StatusPending && job.Status != StatusRunning {
+		return false
+	}
+
+	// Call cancel function if exists
+	if cancel, ok := m.cancelFuncs[id]; ok {
+		cancel()
+		delete(m.cancelFuncs, id)
+	}
+
+	now := time.Now()
+	job.Status = StatusCancelled
+	job.Message = "Job cancelled by user"
+	job.CompletedAt = &now
+	m.notifySubscribers(id, ProgressUpdate{
+		JobID:    id,
+		Progress: job.Progress,
+		Message:  "Job cancelled by user",
+		Status:   StatusCancelled,
+	})
+	m.closeSubscribers(id)
+
+	return true
+}
+
+// IsCancelled checks if a job has been cancelled.
+func (m *Manager) IsCancelled(id string) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	if job, ok := m.jobs[id]; ok {
+		return job.Status == StatusCancelled
+	}
+	return false
 }
 
 // Subscribe creates a channel to receive progress updates for a job.
@@ -229,17 +280,53 @@ func (m *Manager) closeSubscribers(id string) {
 	delete(m.subscribers, id)
 }
 
-// RunAsync executes a job function asynchronously.
+// RunAsync executes a job function asynchronously with cancellation support.
 func (m *Manager) RunAsync(ctx context.Context, jobID string, fn func(ctx context.Context, updateProgress func(int, string)) (map[string]interface{}, error)) {
+	// Create cancellable context
+	jobCtx, cancel := context.WithCancel(ctx)
+	
+	// Store cancel function
+	m.mu.Lock()
+	m.cancelFuncs[jobID] = cancel
+	m.mu.Unlock()
+
 	go func() {
+		defer func() {
+			m.mu.Lock()
+			delete(m.cancelFuncs, jobID)
+			m.mu.Unlock()
+		}()
+
 		m.StartJob(jobID)
 
 		updateProgress := func(progress int, message string) {
+			// Check if cancelled before updating
+			if m.IsCancelled(jobID) {
+				return
+			}
 			m.UpdateProgress(jobID, progress, message)
 		}
 
-		result, err := fn(ctx, updateProgress)
+		result, err := fn(jobCtx, updateProgress)
+		
+		// Check if job was cancelled
+		if m.IsCancelled(jobID) {
+			return // Already marked as cancelled
+		}
+		
 		if err != nil {
+			// Check if error is due to context cancellation
+			if jobCtx.Err() == context.Canceled {
+				m.mu.Lock()
+				if job, ok := m.jobs[jobID]; ok && job.Status != StatusCancelled {
+					now := time.Now()
+					job.Status = StatusCancelled
+					job.Message = "Job cancelled"
+					job.CompletedAt = &now
+				}
+				m.mu.Unlock()
+				return
+			}
 			m.FailJob(jobID, err)
 			return
 		}
