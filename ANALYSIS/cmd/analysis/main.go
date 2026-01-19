@@ -42,9 +42,10 @@ func main() {
 	kallisto := quantify.NewKallisto(cfg.Quantification.Kallisto, cfg.Quantification.Threads, logger)
 	rsem := quantify.NewRSEM(cfg.Quantification.RSEM, cfg.Quantification.Threads, logger)
 	diffAnalysis := stats.NewDifferentialAnalysis(rExecutor, cfg.Analysis, cfg.Directories.Temp, logger)
+	matrixGen := quantify.NewMatrixGenerator(logger)
 
 	// Setup router
-	router := setupRouter(logger, cfg, kallisto, rsem, rExecutor, diffAnalysis)
+	router := setupRouter(logger, cfg, kallisto, rsem, rExecutor, diffAnalysis, matrixGen)
 
 	server := &http.Server{
 		Addr:         fmt.Sprintf(":%d", cfg.Server.Port),
@@ -101,6 +102,7 @@ func setupRouter(
 	rsem *quantify.RSEM,
 	rExecutor *rbridge.Executor,
 	diffAnalysis *stats.DifferentialAnalysis,
+	matrixGen *quantify.MatrixGenerator,
 ) *gin.Engine {
 	if os.Getenv("ENV") == "production" {
 		gin.SetMode(gin.ReleaseMode)
@@ -108,6 +110,7 @@ func setupRouter(
 
 	router := gin.New()
 	router.Use(gin.Recovery())
+	router.Use(corsMiddleware())
 
 	// Health check
 	router.GET("/health", func(c *gin.Context) {
@@ -126,6 +129,7 @@ func setupRouter(
 		{
 			quant.POST("/kallisto", handleKallistoQuant(logger, kallisto, cfg))
 			quant.POST("/rsem", handleRSEMQuant(logger, rsem, cfg))
+			quant.POST("/matrix", handleGenerateMatrix(logger, matrixGen))
 		}
 
 		// Analysis
@@ -142,9 +146,29 @@ func setupRouter(
 			jobs.POST("/quantify", handleQuantifyJob(logger, kallisto, rsem, cfg))
 			jobs.POST("/differential", handleDifferentialJob(logger, diffAnalysis))
 		}
+
+		// Index management
+		api.POST("/index/build", handleBuildIndex(logger, kallisto))
 	}
 
 	return router
+}
+
+// corsMiddleware handles CORS for cross-origin requests.
+func corsMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		c.Header("Access-Control-Allow-Origin", "*")
+		c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
+		c.Header("Access-Control-Allow-Headers", "Origin, Content-Type, Accept, Authorization, X-Requested-With")
+		c.Header("Access-Control-Max-Age", "86400")
+
+		if c.Request.Method == "OPTIONS" {
+			c.AbortWithStatus(http.StatusNoContent)
+			return
+		}
+
+		c.Next()
+	}
 }
 
 // Handler functions
@@ -431,4 +455,64 @@ func getFloat(m map[string]any, key string) float64 {
 		return v
 	}
 	return 0
+}
+
+// Matrix generation handler
+
+type MatrixRequest struct {
+	SampleID      string `json:"sample_id" binding:"required"`
+	AbundanceDir  string `json:"abundance_dir" binding:"required"`
+	OutputFile    string `json:"output_file" binding:"required"`
+}
+
+func handleGenerateMatrix(logger *zap.Logger, matrixGen *quantify.MatrixGenerator) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		var req MatrixRequest
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+
+		err := matrixGen.GenerateSingleSampleMatrix(req.SampleID, req.AbundanceDir, req.OutputFile)
+		if err != nil {
+			logger.Error("matrix generation failed", zap.Error(err))
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+
+		c.JSON(http.StatusOK, gin.H{
+			"status":      "completed",
+			"output_file": req.OutputFile,
+			"sample_id":   req.SampleID,
+		})
+	}
+}
+
+// Index building handler
+
+type BuildIndexRequest struct {
+	FastaFile  string `json:"fasta_file" binding:"required"`
+	IndexPath  string `json:"index_path" binding:"required"`
+}
+
+func handleBuildIndex(logger *zap.Logger, kallisto *quantify.Kallisto) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		var req BuildIndexRequest
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+
+		err := kallisto.BuildIndex(c.Request.Context(), req.FastaFile, req.IndexPath)
+		if err != nil {
+			logger.Error("index building failed", zap.Error(err))
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+
+		c.JSON(http.StatusOK, gin.H{
+			"status":     "completed",
+			"index_path": req.IndexPath,
+		})
+	}
 }
