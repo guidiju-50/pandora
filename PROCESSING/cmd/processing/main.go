@@ -658,10 +658,15 @@ func handleFullPipelineAsync(
 		jobManager.RunAsync(context.Background(), jobID, func(ctx context.Context, updateProgress func(int, string)) (map[string]interface{}, error) {
 			logger.Info("starting full pipeline job", zap.String("job_id", jobID), zap.String("accession", req.Accession))
 
-			// Step 1: Download (0-50%)
+			// Step 1: Download (5-50%) with progress
 			updateProgress(5, fmt.Sprintf("Starting download of %s...", req.Accession))
 
-			downloadResult, err := downloader.SmartDownload(ctx, req.Accession)
+			// Create download progress callback
+			downloadProgress := func(progress int, message string) {
+				updateProgress(progress, message)
+			}
+
+			downloadResult, err := downloader.SmartDownloadWithProgress(ctx, req.Accession, downloadProgress)
 			if err != nil {
 				return nil, fmt.Errorf("download failed: %w", err)
 			}

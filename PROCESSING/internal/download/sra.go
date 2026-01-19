@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -276,10 +277,18 @@ func (d *SRADownloader) DownloadMultiple(ctx context.Context, accessions []strin
 	return results, nil
 }
 
+// ProgressFunc is a callback function for progress updates.
+type ProgressFunc func(progress int, message string)
+
 // SmartDownload tries multiple download strategies.
 // 1. First tries fasterq-dump if available
 // 2. Falls back to ENA direct download if fasterq-dump fails or not available
 func (d *SRADownloader) SmartDownload(ctx context.Context, accession string) (*DownloadResult, error) {
+	return d.SmartDownloadWithProgress(ctx, accession, nil)
+}
+
+// SmartDownloadWithProgress tries multiple download strategies with progress callback.
+func (d *SRADownloader) SmartDownloadWithProgress(ctx context.Context, accession string, progressFn ProgressFunc) (*DownloadResult, error) {
 	d.logger.Info("starting smart download",
 		zap.String("accession", accession),
 	)
@@ -298,8 +307,8 @@ func (d *SRADownloader) SmartDownload(ctx context.Context, accession string) (*D
 		d.logger.Info("SRA Toolkit not available, using ENA direct download")
 	}
 
-	// Fallback to ENA direct download
-	return d.DownloadFromENA(ctx, accession)
+	// Fallback to ENA direct download with progress
+	return d.DownloadFromENAWithProgress(ctx, accession, progressFn)
 }
 
 // isSRAToolkitAvailable checks if fasterq-dump is available and working.
@@ -446,6 +455,276 @@ func (d *SRADownloader) DownloadFromENA(ctx context.Context, accession string) (
 	)
 
 	return result, nil
+}
+
+// DownloadFromENAWithProgress downloads from ENA with progress callback.
+func (d *SRADownloader) DownloadFromENAWithProgress(ctx context.Context, accession string, progressFn ProgressFunc) (*DownloadResult, error) {
+	start := time.Now()
+
+	d.logger.Info("downloading from ENA with progress",
+		zap.String("accession", accession),
+	)
+
+	result := &DownloadResult{
+		Accession: accession,
+		OutputDir: d.outputDir,
+		Status:    "started",
+	}
+
+	// Create output directory
+	outputPath := filepath.Join(d.outputDir, accession)
+	if err := os.MkdirAll(outputPath, 0755); err != nil {
+		result.Status = "failed"
+		result.ErrorMessage = fmt.Sprintf("failed to create output directory: %v", err)
+		return result, err
+	}
+
+	// Report progress
+	if progressFn != nil {
+		progressFn(6, fmt.Sprintf("Querying ENA for %s...", accession))
+	}
+
+	// Get file URLs from ENA API
+	enaAPIURL := fmt.Sprintf(
+		"https://www.ebi.ac.uk/ena/portal/api/filereport?accession=%s&result=read_run&fields=run_accession,fastq_ftp,fastq_md5,fastq_bytes&format=json",
+		accession,
+	)
+
+	req, err := http.NewRequestWithContext(ctx, "GET", enaAPIURL, nil)
+	if err != nil {
+		result.Status = "failed"
+		result.ErrorMessage = fmt.Sprintf("failed to create request: %v", err)
+		return result, err
+	}
+
+	client := &http.Client{Timeout: 60 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		result.Status = "failed"
+		result.ErrorMessage = fmt.Sprintf("ENA API request failed: %v", err)
+		return result, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		result.Status = "failed"
+		result.ErrorMessage = fmt.Sprintf("ENA API returned status %d", resp.StatusCode)
+		return result, fmt.Errorf("ENA API error: %d", resp.StatusCode)
+	}
+
+	var enaFiles []ENAFileInfo
+	if err := json.NewDecoder(resp.Body).Decode(&enaFiles); err != nil {
+		result.Status = "failed"
+		result.ErrorMessage = fmt.Sprintf("failed to parse ENA response: %v", err)
+		return result, err
+	}
+
+	if len(enaFiles) == 0 {
+		result.Status = "failed"
+		result.ErrorMessage = "no files found in ENA for this accession"
+		return result, fmt.Errorf("no files found for %s", accession)
+	}
+
+	// Count total files to download
+	var totalFiles int
+	var totalBytes int64
+	for _, enaFile := range enaFiles {
+		if enaFile.FastqFTP != "" {
+			urls := strings.Split(enaFile.FastqFTP, ";")
+			totalFiles += len(urls)
+		}
+		if enaFile.FastqBytes != "" {
+			for _, b := range strings.Split(enaFile.FastqBytes, ";") {
+				if size, err := strconv.ParseInt(b, 10, 64); err == nil {
+					totalBytes += size
+				}
+			}
+		}
+	}
+
+	if progressFn != nil {
+		sizeStr := formatBytes(totalBytes)
+		progressFn(8, fmt.Sprintf("Found %d files (%s) to download...", totalFiles, sizeStr))
+	}
+
+	// Download FASTQ files with progress
+	var downloadedFiles []string
+	var downloadedBytes int64
+	fileNum := 0
+
+	for _, enaFile := range enaFiles {
+		if enaFile.FastqFTP == "" {
+			continue
+		}
+
+		ftpURLs := strings.Split(enaFile.FastqFTP, ";")
+		byteSizes := strings.Split(enaFile.FastqBytes, ";")
+
+		for i, ftpURL := range ftpURLs {
+			if ftpURL == "" {
+				continue
+			}
+			fileNum++
+
+			// Get file size
+			var fileSize int64
+			if i < len(byteSizes) {
+				fileSize, _ = strconv.ParseInt(byteSizes[i], 10, 64)
+			}
+
+			// Convert FTP URL to HTTP
+			httpURL := "https://" + strings.TrimPrefix(ftpURL, "ftp://")
+			filename := filepath.Base(ftpURL)
+			outputFile := filepath.Join(outputPath, filename)
+
+			d.logger.Info("downloading file",
+				zap.String("url", httpURL),
+				zap.String("output", outputFile),
+				zap.Int64("size", fileSize),
+			)
+
+			// Create progress callback for this file
+			fileProgressFn := func(bytesDownloaded int64) {
+				if progressFn != nil && totalBytes > 0 {
+					// Calculate overall progress (5-45% for download phase)
+					totalDownloaded := downloadedBytes + bytesDownloaded
+					downloadProgress := float64(totalDownloaded) / float64(totalBytes)
+					// Map to 5-45% range
+					progress := 5 + int(downloadProgress*40)
+					if progress > 45 {
+						progress = 45
+					}
+					sizeDownloaded := formatBytes(totalDownloaded)
+					sizeTotal := formatBytes(totalBytes)
+					progressFn(progress, fmt.Sprintf("Downloading %s... (%s / %s)", filename, sizeDownloaded, sizeTotal))
+				}
+			}
+
+			if err := d.downloadFileWithProgress(ctx, httpURL, outputFile, fileProgressFn); err != nil {
+				d.logger.Warn("download failed", zap.Error(err))
+				continue
+			}
+
+			downloadedBytes += fileSize
+
+			// Decompress if gzipped
+			if strings.HasSuffix(outputFile, ".gz") {
+				if progressFn != nil {
+					progressFn(46, fmt.Sprintf("Decompressing %s...", filename))
+				}
+				decompressed, err := d.decompressGzip(ctx, outputFile)
+				if err != nil {
+					d.logger.Warn("decompression failed", zap.Error(err))
+					downloadedFiles = append(downloadedFiles, outputFile)
+				} else {
+					downloadedFiles = append(downloadedFiles, decompressed)
+					os.Remove(outputFile)
+				}
+			} else {
+				downloadedFiles = append(downloadedFiles, outputFile)
+			}
+		}
+	}
+
+	if len(downloadedFiles) == 0 {
+		result.Status = "failed"
+		result.ErrorMessage = "no files downloaded successfully"
+		return result, fmt.Errorf("no files downloaded for %s", accession)
+	}
+
+	result.Files = downloadedFiles
+	result.OutputDir = outputPath
+	result.Duration = time.Since(start)
+	result.Status = "completed"
+
+	if progressFn != nil {
+		progressFn(50, "Download completed!")
+	}
+
+	d.logger.Info("ENA download with progress completed",
+		zap.String("accession", accession),
+		zap.Int("files", len(downloadedFiles)),
+		zap.Duration("duration", result.Duration),
+	)
+
+	return result, nil
+}
+
+// downloadFileWithProgress downloads a file with progress reporting.
+func (d *SRADownloader) downloadFileWithProgress(ctx context.Context, url, outputPath string, progressFn func(int64)) error {
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return err
+	}
+
+	client := &http.Client{Timeout: 60 * time.Minute}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("HTTP error: %d", resp.StatusCode)
+	}
+
+	// Create output file
+	out, err := os.Create(outputPath)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+
+	// Copy with progress reporting
+	var bytesWritten int64
+	buf := make([]byte, 1024*1024) // 1MB buffer
+	lastReport := time.Now()
+
+	for {
+		n, err := resp.Body.Read(buf)
+		if n > 0 {
+			written, writeErr := out.Write(buf[:n])
+			if writeErr != nil {
+				return writeErr
+			}
+			bytesWritten += int64(written)
+
+			// Report progress every 2 seconds
+			if time.Since(lastReport) > 2*time.Second {
+				if progressFn != nil {
+					progressFn(bytesWritten)
+				}
+				lastReport = time.Now()
+			}
+		}
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return err
+		}
+	}
+
+	// Final progress report
+	if progressFn != nil {
+		progressFn(bytesWritten)
+	}
+
+	return nil
+}
+
+// formatBytes formats bytes to human readable string.
+func formatBytes(bytes int64) string {
+	const unit = 1024
+	if bytes < unit {
+		return fmt.Sprintf("%d B", bytes)
+	}
+	div, exp := int64(unit), 0
+	for n := bytes / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %cB", float64(bytes)/float64(div), "KMGTPE"[exp])
 }
 
 // downloadFile downloads a file from URL to the specified path.
