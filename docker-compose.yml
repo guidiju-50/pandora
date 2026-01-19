@@ -45,7 +45,7 @@ services:
       - pandora-network
     restart: unless-stopped
 
-  # ANALYSIS Module (placeholder)
+  # ANALYSIS Module
   analysis:
     build:
       context: ./ANALYSIS
@@ -53,14 +53,22 @@ services:
     container_name: pandora-analysis
     ports:
       - "8082:8082"
+      - "8083:8082"  # Alternative port for external access
     environment:
       - ENV=development
       - CONTROL_API_URL=http://control:8080
+      - PROCESSING_URL=http://processing:8081
+      - REFERENCE_DIR=/data/references
+      - OUTPUT_DIR=/data/output
+      - KALLISTO_PATH=/opt/kallisto/kallisto
     volumes:
       - analysis-data:/data/analysis
       - analysis-results:/data/results
+      - processing-output:/data/output  # Shared with PROCESSING
+      - references:/data/references      # Kallisto indices
     depends_on:
       - control
+      - processing
     networks:
       - pandora-network
     restart: unless-stopped
@@ -134,3 +142,4 @@ volumes:
   processing-output:
   analysis-data:
   analysis-results:
+  references:

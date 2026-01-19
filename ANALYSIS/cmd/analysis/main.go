@@ -15,8 +15,10 @@ import (
 	"github.com/google/uuid"
 	"github.com/guidiju-50/pandora/ANALYSIS/internal/config"
 	"github.com/guidiju-50/pandora/ANALYSIS/internal/models"
+	"github.com/guidiju-50/pandora/ANALYSIS/internal/pipeline"
 	"github.com/guidiju-50/pandora/ANALYSIS/internal/quantify"
 	"github.com/guidiju-50/pandora/ANALYSIS/internal/rbridge"
+	"github.com/guidiju-50/pandora/ANALYSIS/internal/reference"
 	"github.com/guidiju-50/pandora/ANALYSIS/internal/stats"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -44,8 +46,18 @@ func main() {
 	diffAnalysis := stats.NewDifferentialAnalysis(rExecutor, cfg.Analysis, cfg.Directories.Temp, logger)
 	matrixGen := quantify.NewMatrixGenerator(logger)
 
+	// Initialize reference manager for Kallisto indices
+	referenceDir := getEnvOrDefault("REFERENCE_DIR", "/data/references")
+	kallistoPath := getEnvOrDefault("KALLISTO_PATH", "/opt/kallisto/kallisto")
+	refManager := reference.NewManager(referenceDir, kallistoPath, logger)
+
+	// Initialize pipeline orchestrator
+	processingURL := getEnvOrDefault("PROCESSING_URL", "http://processing:8081")
+	outputDir := getEnvOrDefault("OUTPUT_DIR", "/data/output")
+	orchestrator := pipeline.NewOrchestrator(processingURL, refManager, kallisto, matrixGen, outputDir, logger)
+
 	// Setup router
-	router := setupRouter(logger, cfg, kallisto, rsem, rExecutor, diffAnalysis, matrixGen)
+	router := setupRouter(logger, cfg, kallisto, rsem, rExecutor, diffAnalysis, matrixGen, refManager, orchestrator)
 
 	server := &http.Server{
 		Addr:         fmt.Sprintf(":%d", cfg.Server.Port),
@@ -103,6 +115,8 @@ func setupRouter(
 	rExecutor *rbridge.Executor,
 	diffAnalysis *stats.DifferentialAnalysis,
 	matrixGen *quantify.MatrixGenerator,
+	refManager *reference.Manager,
+	orchestrator *pipeline.Orchestrator,
 ) *gin.Engine {
 	if os.Getenv("ENV") == "production" {
 		gin.SetMode(gin.ReleaseMode)
@@ -147,11 +161,35 @@ func setupRouter(
 			jobs.POST("/differential", handleDifferentialJob(logger, diffAnalysis))
 		}
 
-		// Index management
+		// Index/Reference management
+		refs := api.Group("/references")
+		{
+			refs.GET("", handleListOrganisms(logger, refManager))
+			refs.POST("/ensure", handleEnsureIndex(logger, refManager))
+			refs.POST("/custom", handleAddCustomOrganism(logger, refManager))
+		}
+
+		// Index management (legacy)
 		api.POST("/index/build", handleBuildIndex(logger, kallisto))
+
+		// Complete Pipeline - Download → Trim → Quantify → Matrix
+		pipelineGroup := api.Group("/pipeline")
+		{
+			pipelineGroup.POST("/start", handleStartPipeline(logger, orchestrator))
+			pipelineGroup.GET("/jobs", handleListPipelineJobs(logger, orchestrator))
+			pipelineGroup.GET("/jobs/:id", handleGetPipelineJob(logger, orchestrator))
+			pipelineGroup.GET("/jobs/:id/progress", handlePipelineProgress(logger, orchestrator))
+		}
 	}
 
 	return router
+}
+
+func getEnvOrDefault(key, defaultVal string) string {
+	if val := os.Getenv(key); val != "" {
+		return val
+	}
+	return defaultVal
 }
 
 // corsMiddleware handles CORS for cross-origin requests.
@@ -174,12 +212,12 @@ func corsMiddleware() gin.HandlerFunc {
 // Handler functions
 
 type KallistoRequest struct {
-	SampleID   string  `json:"sample_id" binding:"required"`
-	Reads1     string  `json:"reads1" binding:"required"`
-	Reads2     string  `json:"reads2"`
-	Index      string  `json:"index" binding:"required"`
-	OutputDir  string  `json:"output_dir" binding:"required"`
-	Bootstrap  int     `json:"bootstrap"`
+	SampleID  string `json:"sample_id" binding:"required"`
+	Reads1    string `json:"reads1" binding:"required"`
+	Reads2    string `json:"reads2"`
+	Index     string `json:"index" binding:"required"`
+	OutputDir string `json:"output_dir" binding:"required"`
+	Bootstrap int    `json:"bootstrap"`
 }
 
 func handleKallistoQuant(logger *zap.Logger, k *quantify.Kallisto, cfg *config.Config) gin.HandlerFunc {
@@ -213,11 +251,11 @@ func handleKallistoQuant(logger *zap.Logger, k *quantify.Kallisto, cfg *config.C
 func handleRSEMQuant(logger *zap.Logger, r *quantify.RSEM, cfg *config.Config) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		var req struct {
-			SampleID   string `json:"sample_id" binding:"required"`
-			Reads1     string `json:"reads1" binding:"required"`
-			Reads2     string `json:"reads2"`
-			Reference  string `json:"reference" binding:"required"`
-			OutputDir  string `json:"output_dir" binding:"required"`
+			SampleID  string `json:"sample_id" binding:"required"`
+			Reads1    string `json:"reads1" binding:"required"`
+			Reads2    string `json:"reads2"`
+			Reference string `json:"reference" binding:"required"`
+			OutputDir string `json:"output_dir" binding:"required"`
 		}
 		if err := c.ShouldBindJSON(&req); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -271,13 +309,13 @@ func handleDifferential(logger *zap.Logger, da *stats.DifferentialAnalysis) gin.
 		}
 
 		opts := stats.DEOptions{
-			ExperimentID:   expID,
-			CountsFile:     req.CountsFile,
-			MetadataFile:   req.MetadataFile,
-			Comparison:     req.Comparison,
-			Condition1:     req.Condition1,
-			Condition2:     req.Condition2,
-			Method:         req.Method,
+			ExperimentID:    expID,
+			CountsFile:      req.CountsFile,
+			MetadataFile:    req.MetadataFile,
+			Comparison:      req.Comparison,
+			Condition1:      req.Condition1,
+			Condition2:      req.Condition2,
+			Method:          req.Method,
 			PValueThreshold: req.PValueThreshold,
 			Log2FCThreshold: req.Log2FCThreshold,
 		}
@@ -355,9 +393,9 @@ func handleClustering(logger *zap.Logger, da *stats.DifferentialAnalysis) gin.Ha
 func handleQuantifyJob(logger *zap.Logger, k *quantify.Kallisto, r *quantify.RSEM, cfg *config.Config) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		var req struct {
-			JobID    string         `json:"job_id" binding:"required"`
-			Tool     string         `json:"tool" binding:"required"`
-			Input    map[string]any `json:"input" binding:"required"`
+			JobID string         `json:"job_id" binding:"required"`
+			Tool  string         `json:"tool" binding:"required"`
+			Input map[string]any `json:"input" binding:"required"`
 		}
 		if err := c.ShouldBindJSON(&req); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -460,9 +498,9 @@ func getFloat(m map[string]any, key string) float64 {
 // Matrix generation handler
 
 type MatrixRequest struct {
-	SampleID      string `json:"sample_id" binding:"required"`
-	AbundanceDir  string `json:"abundance_dir" binding:"required"`
-	OutputFile    string `json:"output_file" binding:"required"`
+	SampleID     string `json:"sample_id" binding:"required"`
+	AbundanceDir string `json:"abundance_dir" binding:"required"`
+	OutputFile   string `json:"output_file" binding:"required"`
 }
 
 func handleGenerateMatrix(logger *zap.Logger, matrixGen *quantify.MatrixGenerator) gin.HandlerFunc {
@@ -491,8 +529,8 @@ func handleGenerateMatrix(logger *zap.Logger, matrixGen *quantify.MatrixGenerato
 // Index building handler
 
 type BuildIndexRequest struct {
-	FastaFile  string `json:"fasta_file" binding:"required"`
-	IndexPath  string `json:"index_path" binding:"required"`
+	FastaFile string `json:"fasta_file" binding:"required"`
+	IndexPath string `json:"index_path" binding:"required"`
 }
 
 func handleBuildIndex(logger *zap.Logger, kallisto *quantify.Kallisto) gin.HandlerFunc {
@@ -514,5 +552,171 @@ func handleBuildIndex(logger *zap.Logger, kallisto *quantify.Kallisto) gin.Handl
 			"status":     "completed",
 			"index_path": req.IndexPath,
 		})
+	}
+}
+
+// Reference management handlers
+
+func handleListOrganisms(logger *zap.Logger, refManager *reference.Manager) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		organisms := refManager.ListOrganisms()
+		c.JSON(http.StatusOK, gin.H{
+			"organisms": organisms,
+		})
+	}
+}
+
+func handleEnsureIndex(logger *zap.Logger, refManager *reference.Manager) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		var req struct {
+			Organism string `json:"organism" binding:"required"`
+		}
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+
+		err := refManager.EnsureIndex(c.Request.Context(), req.Organism, nil)
+		if err != nil {
+			logger.Error("failed to ensure index", zap.Error(err))
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+
+		indexPath, _ := refManager.GetIndexPath(req.Organism)
+		c.JSON(http.StatusOK, gin.H{
+			"status":     "completed",
+			"organism":   req.Organism,
+			"index_path": indexPath,
+		})
+	}
+}
+
+func handleAddCustomOrganism(logger *zap.Logger, refManager *reference.Manager) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		var req struct {
+			Name           string `json:"name" binding:"required"`
+			ScientificName string `json:"scientific_name"`
+			TaxID          string `json:"tax_id"`
+			IndexPath      string `json:"index_path" binding:"required"`
+		}
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+
+		err := refManager.AddCustomOrganism(req.Name, req.ScientificName, req.TaxID, req.IndexPath)
+		if err != nil {
+			logger.Error("failed to add custom organism", zap.Error(err))
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+
+		c.JSON(http.StatusOK, gin.H{
+			"status":   "added",
+			"organism": req.Name,
+		})
+	}
+}
+
+// Pipeline handlers
+
+func handleStartPipeline(logger *zap.Logger, orchestrator *pipeline.Orchestrator) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		var req struct {
+			Accession     string `json:"accession" binding:"required"`
+			Organism      string `json:"organism"`
+			Leading       int    `json:"leading"`
+			Trailing      int    `json:"trailing"`
+			SlidingWindow string `json:"sliding_window"`
+			MinLen        int    `json:"min_len"`
+		}
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+
+		input := pipeline.PipelineInput{
+			Accession:     req.Accession,
+			Organism:      req.Organism,
+			Leading:       req.Leading,
+			Trailing:      req.Trailing,
+			SlidingWindow: req.SlidingWindow,
+			MinLen:        req.MinLen,
+		}
+
+		jobID, err := orchestrator.StartPipeline(c.Request.Context(), input)
+		if err != nil {
+			logger.Error("failed to start pipeline", zap.Error(err))
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+
+		c.JSON(http.StatusAccepted, gin.H{
+			"status":  "started",
+			"job_id":  jobID,
+			"message": "Pipeline started. Check /api/v1/pipeline/jobs/" + jobID + " for progress.",
+		})
+	}
+}
+
+func handleListPipelineJobs(logger *zap.Logger, orchestrator *pipeline.Orchestrator) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		jobs := orchestrator.ListJobs()
+		c.JSON(http.StatusOK, gin.H{
+			"jobs": jobs,
+		})
+	}
+}
+
+func handleGetPipelineJob(logger *zap.Logger, orchestrator *pipeline.Orchestrator) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		jobID := c.Param("id")
+		job, found := orchestrator.GetJob(jobID)
+		if !found {
+			c.JSON(http.StatusNotFound, gin.H{"error": "job not found"})
+			return
+		}
+		c.JSON(http.StatusOK, job)
+	}
+}
+
+func handlePipelineProgress(logger *zap.Logger, orchestrator *pipeline.Orchestrator) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		jobID := c.Param("id")
+		_, found := orchestrator.GetJob(jobID)
+		if !found {
+			c.JSON(http.StatusNotFound, gin.H{"error": "job not found"})
+			return
+		}
+
+		c.Header("Content-Type", "text/event-stream")
+		c.Header("Cache-Control", "no-cache")
+		c.Header("Connection", "keep-alive")
+		c.Header("Access-Control-Allow-Origin", "*")
+
+		clientGone := c.Request.Context().Done()
+		ticker := time.NewTicker(1 * time.Second)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-clientGone:
+				return
+			case <-ticker.C:
+				currentJob, found := orchestrator.GetJob(jobID)
+				if !found {
+					return
+				}
+
+				fmt.Fprintf(c.Writer, "data: {\"progress\":%d,\"stage\":\"%s\",\"message\":\"%s\",\"status\":\"%s\"}\n\n",
+					currentJob.Progress, currentJob.Stage, currentJob.Message, currentJob.Status)
+				c.Writer.Flush()
+
+				if currentJob.Status == "completed" || currentJob.Status == "failed" {
+					return
+				}
+			}
+		}
 	}
 }

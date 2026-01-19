@@ -54,11 +54,14 @@ COPY r_scripts/ /app/r_scripts/
 COPY configs/ /app/configs/
 
 # Create directories
-RUN mkdir -p /data/analysis /data/results /tmp/analysis
+RUN mkdir -p /data/analysis /data/results /data/references /data/output /tmp/analysis
 
 # Set environment
 ENV KALLISTO_PATH=/opt/kallisto/kallisto
 ENV R_PATH=/usr/bin/Rscript
+ENV REFERENCE_DIR=/data/references
+ENV OUTPUT_DIR=/data/output
+ENV PROCESSING_URL=http://processing:8081
 
 # Expose port
 EXPOSE 8082
