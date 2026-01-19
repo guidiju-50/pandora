@@ -73,18 +73,26 @@ services:
       - pandora-network
     restart: unless-stopped
 
-  # OPERATION Module (placeholder)
+  # OPERATION Module (Frontend)
   operation:
     build:
       context: ./OPERATION
       dockerfile: Dockerfile
+      args:
+        - VITE_API_URL=http://localhost:8080/api/v1
+        - VITE_PROCESSING_URL=http://localhost:8081/api/v1
+        - VITE_ANALYSIS_URL=http://localhost:8082/api/v1
     container_name: pandora-operation
     ports:
       - "3000:80"
     environment:
       - VITE_API_URL=http://localhost:8080/api/v1
+      - VITE_PROCESSING_URL=http://localhost:8081/api/v1
+      - VITE_ANALYSIS_URL=http://localhost:8082/api/v1
     depends_on:
       - control
+      - processing
+      - analysis
     networks:
       - pandora-network
     restart: unless-stopped

@@ -3,6 +3,16 @@ FROM node:20-alpine AS build
 
 WORKDIR /app
 
+# Build arguments for API URLs
+ARG VITE_API_URL=http://localhost:8080/api/v1
+ARG VITE_PROCESSING_URL=http://localhost:8081/api/v1
+ARG VITE_ANALYSIS_URL=http://localhost:8082/api/v1
+
+# Set environment variables for build
+ENV VITE_API_URL=$VITE_API_URL
+ENV VITE_PROCESSING_URL=$VITE_PROCESSING_URL
+ENV VITE_ANALYSIS_URL=$VITE_ANALYSIS_URL
+
 # Copy package files
 COPY package.json ./
 
