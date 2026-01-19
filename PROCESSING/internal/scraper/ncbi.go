@@ -45,7 +45,7 @@ func (s *NCBIScraper) SearchSRA(ctx context.Context, query string, maxResults in
 
 	// URL-encode the query to handle spaces and special characters
 	encodedQuery := url.QueryEscape(query)
-	
+
 	searchURL := fmt.Sprintf("%s/esearch.fcgi?db=sra&term=%s&retmax=%d&usehistory=y",
 		s.config.BaseURL, encodedQuery, maxResults)
 

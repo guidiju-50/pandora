@@ -54,8 +54,8 @@ type JobOutput struct {
 
 // SRARecord represents a record from the SRA database.
 type SRARecord struct {
-	Accession       string    `json:"accession"`        // Experiment accession (SRX/ERX/DRX)
-	RunAccession    string    `json:"run_accession"`    // Run accession (SRR/ERR/DRR) - used for download
+	Accession       string    `json:"accession"`     // Experiment accession (SRX/ERX/DRX)
+	RunAccession    string    `json:"run_accession"` // Run accession (SRR/ERR/DRR) - used for download
 	Title           string    `json:"title"`
 	Platform        string    `json:"platform"`
 	Instrument      string    `json:"instrument"`
@@ -72,7 +72,7 @@ type SRARecord struct {
 	TotalReads      int64     `json:"total_reads"`
 	TotalBases      int64     `json:"total_bases"`
 	AvgLength       int       `json:"avg_length"`
-	Spots           int64     `json:"spots"`            // Number of spots/reads for display
+	Spots           int64     `json:"spots"` // Number of spots/reads for display
 }
 
 // FASTQFile represents a FASTQ file with metadata.
