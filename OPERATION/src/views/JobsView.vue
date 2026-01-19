@@ -1,22 +1,69 @@
 <script setup>
-import { ref, computed } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useJobsStore } from '@/store/jobs'
+import { getAllJobs } from '@/services/processing'
 
 const jobsStore = useJobsStore()
 
 const filter = ref('all')
+const processingJobs = ref([])
+const loadingProcessingJobs = ref(false)
+let pollInterval = null
+
+// Combine jobs from both sources
+const allJobs = computed(() => {
+  // Map processing jobs to consistent format
+  const mappedProcessingJobs = processingJobs.value.map(job => ({
+    ...job,
+    source: 'processing',
+    type: job.type || 'download',
+    created_at: job.created_at,
+    started_at: job.started_at,
+    completed_at: job.completed_at
+  }))
+  
+  // Add source to control jobs
+  const controlJobs = jobsStore.jobs.map(job => ({
+    ...job,
+    source: 'control'
+  }))
+  
+  return [...mappedProcessingJobs, ...controlJobs].sort((a, b) => 
+    new Date(b.created_at) - new Date(a.created_at)
+  )
+})
 
 const filteredJobs = computed(() => {
-  if (filter.value === 'all') return jobsStore.jobs
-  return jobsStore.jobs.filter(job => job.status === filter.value)
+  if (filter.value === 'all') return allJobs.value
+  return allJobs.value.filter(job => job.status === filter.value)
 })
 
 const statusCounts = computed(() => ({
-  all: jobsStore.jobs.length,
-  running: jobsStore.runningJobs.length,
-  completed: jobsStore.completedJobs.length,
-  failed: jobsStore.failedJobs.length
+  all: allJobs.value.length,
+  running: allJobs.value.filter(j => j.status === 'running').length,
+  completed: allJobs.value.filter(j => j.status === 'completed').length,
+  failed: allJobs.value.filter(j => j.status === 'failed').length
 }))
+
+// Fetch processing jobs
+async function fetchProcessingJobs() {
+  try {
+    const data = await getAllJobs()
+    processingJobs.value = data.jobs || []
+  } catch (e) {
+    console.error('Failed to fetch processing jobs:', e)
+  }
+}
+
+onMounted(() => {
+  fetchProcessingJobs()
+  // Poll every 3 seconds
+  pollInterval = setInterval(fetchProcessingJobs, 3000)
+})
+
+onUnmounted(() => {
+  if (pollInterval) clearInterval(pollInterval)
+})
 
 function getStatusClass(status) {
   const classes = {
@@ -82,6 +129,11 @@ function formatDate(date) {
               <line x1="2" y1="12" x2="22" y2="12"></line>
               <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path>
             </svg>
+            <svg v-else-if="job.type === 'download' || job.type === 'full-pipeline'" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+              <polyline points="7 10 12 15 17 10"></polyline>
+              <line x1="12" y1="15" x2="12" y2="3"></line>
+            </svg>
             <svg v-else-if="job.type === 'process'" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <polyline points="16 18 22 12 16 6"></polyline>
               <polyline points="8 6 2 12 8 18"></polyline>
@@ -93,22 +145,32 @@ function formatDate(date) {
             </svg>
           </div>
           <div class="job-info">
-            <div class="job-title">{{ job.type }}</div>
-            <div class="job-id">{{ job.id }}</div>
+            <div class="job-title">
+              {{ job.type === 'full-pipeline' ? 'Download & Process' : job.type }}
+              <span v-if="job.input?.accession" class="job-accession">{{ job.input.accession }}</span>
+            </div>
+            <div class="job-id">{{ job.id?.substring(0, 8) }}...</div>
           </div>
         </div>
         
         <div class="job-meta">
           <span class="badge" :class="getStatusClass(job.status)">{{ job.status }}</span>
+          <span v-if="job.source === 'processing'" class="source-badge">PROCESSING</span>
           <span class="job-date">{{ formatDate(job.created_at) }}</span>
         </div>
 
-        <div v-if="job.status === 'running'" class="job-progress">
+        <div v-if="job.status === 'running' || job.status === 'pending'" class="job-progress">
           <div class="progress-bar">
-            <div class="progress-fill" :style="{ width: job.progress + '%' }"></div>
+            <div 
+              class="progress-fill" 
+              :class="{ 'progress-animated': job.status === 'running' }"
+              :style="{ width: (job.progress || 0) + '%' }"
+            ></div>
           </div>
-          <span class="progress-text">{{ job.progress }}%</span>
+          <span class="progress-text">{{ job.progress || 0 }}%</span>
         </div>
+        
+        <div v-if="job.message" class="job-message">{{ job.message }}</div>
       </div>
     </div>
   </div>
@@ -296,5 +358,50 @@ function formatDate(date) {
   font-weight: 500;
   color: var(--accent-primary);
   min-width: 40px;
+}
+
+.progress-animated {
+  background: linear-gradient(
+    90deg,
+    var(--accent-primary),
+    #22d3ee,
+    var(--accent-primary)
+  );
+  background-size: 200% 100%;
+  animation: progressShimmer 1.5s ease infinite;
+}
+
+@keyframes progressShimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+.job-accession {
+  font-family: var(--font-mono);
+  font-size: 0.875rem;
+  color: var(--accent-primary);
+  margin-left: 0.5rem;
+}
+
+.source-badge {
+  font-size: 0.625rem;
+  font-weight: 600;
+  padding: 0.125rem 0.375rem;
+  background: rgba(6, 182, 212, 0.15);
+  color: var(--accent-primary);
+  border-radius: 4px;
+  text-transform: uppercase;
+}
+
+.job-message {
+  width: 100%;
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+  padding-top: 0.5rem;
+}
+
+.badge--warning {
+  background: rgba(245, 158, 11, 0.2);
+  color: #f59e0b;
 }
 </style>
