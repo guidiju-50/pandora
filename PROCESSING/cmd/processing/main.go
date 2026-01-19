@@ -5,6 +5,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/signal"
@@ -15,6 +16,7 @@ import (
 	"github.com/guidiju-50/pandora/PROCESSING/internal/config"
 	"github.com/guidiju-50/pandora/PROCESSING/internal/download"
 	"github.com/guidiju-50/pandora/PROCESSING/internal/etl"
+	"github.com/guidiju-50/pandora/PROCESSING/internal/jobs"
 	"github.com/guidiju-50/pandora/PROCESSING/internal/scraper"
 	"github.com/guidiju-50/pandora/PROCESSING/internal/trimming"
 	"go.uber.org/zap"
@@ -55,8 +57,11 @@ func main() {
 		Threads:     4,
 	}, logger)
 
+	// Initialize job manager
+	jobManager := jobs.NewManager()
+
 	// Create HTTP server
-	router := setupRouter(logger, pipeline, trimmomatic, qualityChecker, sraDownloader)
+	router := setupRouter(logger, pipeline, trimmomatic, qualityChecker, sraDownloader, jobManager)
 
 	server := &http.Server{
 		Addr:         fmt.Sprintf(":%d", cfg.Server.Port),
@@ -126,6 +131,7 @@ func setupRouter(
 	trimmomatic *trimming.Trimmomatic,
 	qualityChecker *trimming.QualityChecker,
 	sraDownloader *download.SRADownloader,
+	jobManager *jobs.Manager,
 ) *gin.Engine {
 	// Set Gin mode based on environment
 	if os.Getenv("ENV") == "production" {
@@ -149,14 +155,19 @@ func setupRouter(
 	// API routes
 	api := router.Group("/api/v1")
 	{
-		// Jobs
-		jobs := api.Group("/jobs")
+		// Job management
+		api.GET("/jobs", handleListJobs(jobManager))
+		api.GET("/jobs/:id", handleGetJob(jobManager))
+		api.GET("/jobs/:id/progress", handleJobProgress(jobManager))
+
+		// Job actions
+		jobsGroup := api.Group("/jobs")
 		{
-			jobs.POST("/scrape", handleScrape(logger, pipeline))
-			jobs.POST("/download", handleDownload(logger, sraDownloader))
-			jobs.POST("/process", handleProcess(logger, trimmomatic, qualityChecker))
-			jobs.POST("/etl", handleETL(logger, pipeline))
-			jobs.POST("/full-pipeline", handleFullPipeline(logger, sraDownloader, trimmomatic, qualityChecker))
+			jobsGroup.POST("/scrape", handleScrape(logger, pipeline))
+			jobsGroup.POST("/download", handleDownloadAsync(logger, sraDownloader, jobManager))
+			jobsGroup.POST("/process", handleProcess(logger, trimmomatic, qualityChecker))
+			jobsGroup.POST("/etl", handleETL(logger, pipeline))
+			jobsGroup.POST("/full-pipeline", handleFullPipelineAsync(logger, sraDownloader, trimmomatic, qualityChecker, jobManager))
 		}
 
 		// Quality check
@@ -493,6 +504,224 @@ func handleQualityCheck(logger *zap.Logger, qc *trimming.QualityChecker) gin.Han
 		c.JSON(http.StatusOK, gin.H{
 			"status":  "completed",
 			"metrics": metrics,
+		})
+	}
+}
+
+// Job management handlers
+
+func handleListJobs(jobManager *jobs.Manager) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		allJobs := jobManager.GetAllJobs()
+		c.JSON(http.StatusOK, gin.H{
+			"jobs": allJobs,
+		})
+	}
+}
+
+func handleGetJob(jobManager *jobs.Manager) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		id := c.Param("id")
+		job, ok := jobManager.GetJob(id)
+		if !ok {
+			c.JSON(http.StatusNotFound, gin.H{"error": "job not found"})
+			return
+		}
+		c.JSON(http.StatusOK, job)
+	}
+}
+
+// handleJobProgress returns Server-Sent Events for job progress.
+func handleJobProgress(jobManager *jobs.Manager) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		id := c.Param("id")
+		job, ok := jobManager.GetJob(id)
+		if !ok {
+			c.JSON(http.StatusNotFound, gin.H{"error": "job not found"})
+			return
+		}
+
+		// If job is already completed, just return the final state
+		if job.Status == jobs.StatusCompleted || job.Status == jobs.StatusFailed {
+			c.JSON(http.StatusOK, gin.H{
+				"job_id":   id,
+				"progress": job.Progress,
+				"message":  job.Message,
+				"status":   job.Status,
+			})
+			return
+		}
+
+		// SSE stream for real-time progress
+		c.Header("Content-Type", "text/event-stream")
+		c.Header("Cache-Control", "no-cache")
+		c.Header("Connection", "keep-alive")
+
+		ch := jobManager.Subscribe(id)
+		defer jobManager.Unsubscribe(id, ch)
+
+		c.Stream(func(w io.Writer) bool {
+			select {
+			case update, ok := <-ch:
+				if !ok {
+					return false
+				}
+				c.SSEvent("progress", update)
+				// Stop streaming if job is done
+				if update.Status == jobs.StatusCompleted || update.Status == jobs.StatusFailed {
+					return false
+				}
+				return true
+			case <-c.Request.Context().Done():
+				return false
+			}
+		})
+	}
+}
+
+// Async handlers
+
+func handleDownloadAsync(logger *zap.Logger, downloader *download.SRADownloader, jobManager *jobs.Manager) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		var req DownloadRequest
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+
+		if len(req.Accessions) == 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "at least one accession required"})
+			return
+		}
+
+		// Create job
+		input := map[string]interface{}{
+			"accessions":   req.Accessions,
+			"use_prefetch": req.UsePrefetch,
+		}
+		jobID := jobManager.CreateJob("download", input)
+
+		// Run async
+		jobManager.RunAsync(context.Background(), jobID, func(ctx context.Context, updateProgress func(int, string)) (map[string]interface{}, error) {
+			results := make([]*download.DownloadResult, 0, len(req.Accessions))
+			total := len(req.Accessions)
+
+			for i, acc := range req.Accessions {
+				progress := (i * 100) / total
+				updateProgress(progress, fmt.Sprintf("Downloading %s (%d/%d)...", acc, i+1, total))
+
+				result, err := downloader.SmartDownload(ctx, acc)
+				if err != nil {
+					logger.Warn("download failed", zap.String("accession", acc), zap.Error(err))
+				}
+				results = append(results, result)
+			}
+
+			return map[string]interface{}{
+				"results": results,
+			}, nil
+		})
+
+		c.JSON(http.StatusAccepted, gin.H{
+			"job_id":  jobID,
+			"message": "Download job created",
+			"status":  "pending",
+		})
+	}
+}
+
+func handleFullPipelineAsync(
+	logger *zap.Logger,
+	downloader *download.SRADownloader,
+	trimmomatic *trimming.Trimmomatic,
+	qc *trimming.QualityChecker,
+	jobManager *jobs.Manager,
+) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		var req FullPipelineRequest
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+
+		// Create job
+		input := map[string]interface{}{
+			"accession":      req.Accession,
+			"leading":        req.Leading,
+			"trailing":       req.Trailing,
+			"sliding_window": req.SlidingWindow,
+			"min_len":        req.MinLen,
+		}
+		jobID := jobManager.CreateJob("full-pipeline", input)
+
+		// Run async
+		jobManager.RunAsync(context.Background(), jobID, func(ctx context.Context, updateProgress func(int, string)) (map[string]interface{}, error) {
+			logger.Info("starting full pipeline job", zap.String("job_id", jobID), zap.String("accession", req.Accession))
+
+			// Step 1: Download (0-50%)
+			updateProgress(5, fmt.Sprintf("Starting download of %s...", req.Accession))
+
+			downloadResult, err := downloader.SmartDownload(ctx, req.Accession)
+			if err != nil {
+				return nil, fmt.Errorf("download failed: %w", err)
+			}
+
+			if len(downloadResult.Files) == 0 {
+				return nil, fmt.Errorf("no FASTQ files generated")
+			}
+
+			updateProgress(50, "Download completed, starting quality analysis...")
+
+			// Step 2: Quality check before trimming
+			beforeQuality, _ := qc.AnalyzeFile(downloadResult.Files[0])
+
+			updateProgress(55, "Starting Trimmomatic processing...")
+
+			// Step 3: Trimmomatic processing (50-90%)
+			outputDir := downloadResult.OutputDir + "/trimmed"
+			opts := trimming.Options{
+				InputFile1:    downloadResult.Files[0],
+				OutputDir:     outputDir,
+				Leading:       req.Leading,
+				Trailing:      req.Trailing,
+				SlidingWindow: req.SlidingWindow,
+				MinLen:        req.MinLen,
+			}
+
+			if len(downloadResult.Files) > 1 {
+				opts.InputFile2 = downloadResult.Files[1]
+			}
+
+			trimResult, err := trimmomatic.Run(ctx, opts)
+			if err != nil {
+				return nil, fmt.Errorf("trimmomatic failed: %w", err)
+			}
+
+			updateProgress(90, "Trimming completed, analyzing quality...")
+
+			// Step 4: Quality check after trimming
+			var comparison *trimming.QualityComparison
+			if beforeQuality != nil && len(trimResult.OutputFiles) > 0 {
+				afterQuality, err := qc.AnalyzeFile(trimResult.OutputFiles[0])
+				if err == nil {
+					comparison = qc.CompareQuality(beforeQuality, afterQuality)
+				}
+			}
+
+			updateProgress(100, "Pipeline completed successfully")
+
+			return map[string]interface{}{
+				"download":           downloadResult,
+				"trimming":           trimResult.ToModel(),
+				"quality_comparison": comparison,
+			}, nil
+		})
+
+		c.JSON(http.StatusAccepted, gin.H{
+			"job_id":    jobID,
+			"message":   "Full pipeline job created",
+			"status":    "pending",
+			"accession": req.Accession,
 		})
 	}
 }

@@ -1,6 +1,6 @@
 <script setup>
-import { ref, computed } from 'vue'
-import { downloadSRR, runFullPipeline, searchSRA } from '@/services/processing'
+import { ref, computed, onUnmounted } from 'vue'
+import { downloadSRR, runFullPipeline, searchSRA, pollJobUntilComplete, getJob } from '@/services/processing'
 
 // Form state
 const accessionInput = ref('')
@@ -22,6 +22,10 @@ const error = ref('')
 const results = ref(null)
 const searchResults = ref([])
 const selectedAccessions = ref([])
+
+// Progress tracking
+const activeJobs = ref([])
+const pollingIntervals = ref([])
 
 // Parsed accessions from input
 const accessions = computed(() => {
@@ -80,7 +84,7 @@ function addSelectedToInput() {
   selectedAccessions.value = []
 }
 
-// Submit download/pipeline job
+// Submit download/pipeline job (async with progress tracking)
 async function handleSubmit() {
   if (accessions.value.length === 0) {
     error.value = 'Please enter at least one valid SRR/ERR/DRR accession'
@@ -90,30 +94,103 @@ async function handleSubmit() {
   loading.value = true
   error.value = ''
   results.value = null
+  activeJobs.value = []
   
   try {
     if (useFullPipeline.value) {
-      // Run full pipeline for each accession
-      const allResults = []
+      // Run full pipeline for each accession (async)
       for (const acc of accessions.value) {
-        const result = await runFullPipeline({
+        const jobInfo = await runFullPipeline({
           accession: acc,
           ...trimmingOptions.value
         })
-        allResults.push(result)
+        
+        // Add job to active jobs for tracking
+        activeJobs.value.push({
+          id: jobInfo.job_id,
+          accession: acc,
+          type: 'full-pipeline',
+          progress: 0,
+          message: 'Job created...',
+          status: 'pending',
+          result: null
+        })
+        
+        // Start polling for progress
+        startPolling(jobInfo.job_id, acc)
       }
-      results.value = { pipeline: allResults }
     } else {
-      // Download only
-      const data = await downloadSRR(accessions.value)
-      results.value = data
+      // Download only (async)
+      const jobInfo = await downloadSRR(accessions.value)
+      
+      activeJobs.value.push({
+        id: jobInfo.job_id,
+        accession: accessions.value.join(', '),
+        type: 'download',
+        progress: 0,
+        message: 'Job created...',
+        status: 'pending',
+        result: null
+      })
+      
+      startPolling(jobInfo.job_id, accessions.value.join(', '))
     }
   } catch (e) {
-    error.value = e.response?.data?.error || 'Operation failed'
-  } finally {
+    error.value = e.response?.data?.error || 'Failed to create job'
     loading.value = false
   }
 }
+
+// Start polling for job progress
+function startPolling(jobId, accession) {
+  const interval = setInterval(async () => {
+    try {
+      const job = await getJob(jobId)
+      
+      // Update active job
+      const jobIndex = activeJobs.value.findIndex(j => j.id === jobId)
+      if (jobIndex !== -1) {
+        activeJobs.value[jobIndex] = {
+          ...activeJobs.value[jobIndex],
+          progress: job.progress,
+          message: job.message,
+          status: job.status,
+          result: job.output
+        }
+      }
+      
+      // Check if completed
+      if (job.status === 'completed' || job.status === 'failed') {
+        clearInterval(interval)
+        
+        // Check if all jobs are done
+        const allDone = activeJobs.value.every(
+          j => j.status === 'completed' || j.status === 'failed'
+        )
+        if (allDone) {
+          loading.value = false
+          // Compile results
+          results.value = {
+            jobs: activeJobs.value.map(j => ({
+              accession: j.accession,
+              status: j.status,
+              ...j.result
+            }))
+          }
+        }
+      }
+    } catch (e) {
+      console.error('Polling error:', e)
+    }
+  }, 1500)
+  
+  pollingIntervals.value.push(interval)
+}
+
+// Cleanup on unmount
+onUnmounted(() => {
+  pollingIntervals.value.forEach(interval => clearInterval(interval))
+})
 
 // Format file size
 function formatBytes(bytes) {
@@ -284,9 +361,93 @@ function formatDuration(ns) {
       </div>
     </div>
 
+    <!-- Active Jobs with Progress -->
+    <div v-if="activeJobs.length > 0" class="active-jobs-section">
+      <h3>Active Jobs</h3>
+      <div class="jobs-list">
+        <div v-for="job in activeJobs" :key="job.id" class="job-card">
+          <div class="job-header">
+            <span class="accession">{{ job.accession }}</span>
+            <span 
+              class="badge" 
+              :class="{
+                'badge--warning': job.status === 'pending' || job.status === 'running',
+                'badge--success': job.status === 'completed',
+                'badge--danger': job.status === 'failed'
+              }"
+            >
+              {{ job.status }}
+            </span>
+          </div>
+          
+          <!-- Progress Bar -->
+          <div class="progress-container">
+            <div class="progress-bar">
+              <div 
+                class="progress-fill" 
+                :style="{ width: `${job.progress}%` }"
+                :class="{ 'progress-animated': job.status === 'running' }"
+              ></div>
+            </div>
+            <span class="progress-text">{{ job.progress }}%</span>
+          </div>
+          
+          <div class="job-message">{{ job.message }}</div>
+          
+          <!-- Show output files when completed -->
+          <div v-if="job.status === 'completed' && job.result?.download?.files" class="job-output">
+            <strong>Downloaded files:</strong>
+            <ul>
+              <li v-for="file in job.result.download.files" :key="file">
+                {{ file.split('/').pop() }}
+              </li>
+            </ul>
+          </div>
+          
+          <div v-if="job.status === 'failed'" class="job-error">
+            {{ job.result?.error || 'Job failed' }}
+          </div>
+        </div>
+      </div>
+    </div>
+
     <!-- Results -->
     <div v-if="results" class="results-section">
       <h3>Results</h3>
+      
+      <div v-if="results.jobs" class="results-list">
+        <div v-for="job in results.jobs" :key="job.accession" class="result-card">
+          <div class="result-header">
+            <span class="accession">{{ job.accession }}</span>
+            <span class="badge" :class="job.status === 'completed' ? 'badge--success' : 'badge--danger'">
+              {{ job.status }}
+            </span>
+          </div>
+          <div v-if="job.download" class="result-details">
+            <h4>Download</h4>
+            <div class="detail-item">
+              <span class="label">Files:</span>
+              <span class="value">{{ job.download?.files?.length || 0 }}</span>
+            </div>
+            <div v-if="job.download?.files" class="files-list">
+              <div v-for="file in job.download.files" :key="file" class="file-item">
+                {{ file.split('/').pop() }}
+              </div>
+            </div>
+          </div>
+          <div v-if="job.trimming" class="result-details">
+            <h4>Trimming</h4>
+            <div class="detail-item">
+              <span class="label">Input Reads:</span>
+              <span class="value">{{ job.trimming?.input_reads?.toLocaleString() }}</span>
+            </div>
+            <div class="detail-item">
+              <span class="label">Output Reads:</span>
+              <span class="value">{{ job.trimming?.output_reads?.toLocaleString() }}</span>
+            </div>
+          </div>
+        </div>
+      </div>
       
       <div v-if="results.results" class="results-list">
         <div v-for="result in results.results" :key="result.accession" class="result-card">
@@ -626,5 +787,132 @@ function formatDuration(ns) {
   margin-top: 1rem;
   padding-top: 1rem;
   border-top: 1px solid var(--border-color);
+}
+
+// Active Jobs Section
+.active-jobs-section {
+  margin-bottom: 2rem;
+  
+  h3 {
+    margin-bottom: 1rem;
+  }
+}
+
+.jobs-list {
+  display: grid;
+  gap: 1rem;
+}
+
+.job-card {
+  padding: 1.25rem;
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-lg);
+}
+
+.job-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 1rem;
+  
+  .accession {
+    font-family: var(--font-mono);
+    font-size: 1rem;
+    font-weight: 600;
+  }
+}
+
+.progress-container {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  margin-bottom: 0.75rem;
+}
+
+.progress-bar {
+  flex: 1;
+  height: 8px;
+  background: var(--bg-secondary);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--accent-primary), var(--accent-secondary, #22d3ee));
+  border-radius: 4px;
+  transition: width 0.3s ease;
+}
+
+.progress-animated {
+  background: linear-gradient(
+    90deg,
+    var(--accent-primary),
+    #22d3ee,
+    var(--accent-primary)
+  );
+  background-size: 200% 100%;
+  animation: progressShimmer 1.5s ease infinite;
+}
+
+@keyframes progressShimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+.progress-text {
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: var(--accent-primary);
+  min-width: 3rem;
+  text-align: right;
+}
+
+.job-message {
+  font-size: 0.875rem;
+  color: var(--text-secondary);
+  margin-bottom: 0.5rem;
+}
+
+.job-output {
+  margin-top: 1rem;
+  padding: 0.75rem;
+  background: var(--bg-secondary);
+  border-radius: var(--radius-md);
+  font-size: 0.875rem;
+  
+  strong {
+    display: block;
+    margin-bottom: 0.5rem;
+    color: var(--text-primary);
+  }
+  
+  ul {
+    margin: 0;
+    padding-left: 1.25rem;
+    
+    li {
+      font-family: var(--font-mono);
+      font-size: 0.75rem;
+      color: var(--text-secondary);
+      padding: 0.125rem 0;
+    }
+  }
+}
+
+.job-error {
+  margin-top: 0.75rem;
+  padding: 0.75rem;
+  background: rgba(239, 68, 68, 0.1);
+  border: 1px solid rgba(239, 68, 68, 0.3);
+  border-radius: var(--radius-md);
+  color: var(--accent-danger);
+  font-size: 0.875rem;
+}
+
+.badge--warning {
+  background: rgba(245, 158, 11, 0.2);
+  color: #f59e0b;
 }
 </style>
