@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/xml"
 	"fmt"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -42,14 +43,19 @@ func NewNCBIScraper(cfg config.NCBIConfig, logger *zap.Logger) *NCBIScraper {
 func (s *NCBIScraper) SearchSRA(ctx context.Context, query string, maxResults int) ([]string, error) {
 	s.logger.Info("searching SRA", zap.String("query", query), zap.Int("max_results", maxResults))
 
-	url := fmt.Sprintf("%s/esearch.fcgi?db=sra&term=%s&retmax=%d&usehistory=y",
-		s.config.BaseURL, query, maxResults)
+	// URL-encode the query to handle spaces and special characters
+	encodedQuery := url.QueryEscape(query)
+	
+	searchURL := fmt.Sprintf("%s/esearch.fcgi?db=sra&term=%s&retmax=%d&usehistory=y",
+		s.config.BaseURL, encodedQuery, maxResults)
 
 	if s.config.APIKey != "" {
-		url += "&api_key=" + s.config.APIKey
+		searchURL += "&api_key=" + s.config.APIKey
 	}
 
-	data, err := s.client.Get(ctx, url)
+	s.logger.Debug("NCBI search URL", zap.String("url", searchURL))
+
+	data, err := s.client.Get(ctx, searchURL)
 	if err != nil {
 		return nil, fmt.Errorf("searching SRA: %w", err)
 	}
@@ -142,17 +148,30 @@ func (s *NCBIScraper) GetRunInfo(ctx context.Context, accession string) (*models
 
 // parseSRARecord parses XML data into an SRARecord.
 func (s *NCBIScraper) parseSRARecord(data []byte) (*models.SRARecord, error) {
+	// Try parsing as EXPERIMENT_PACKAGE_SET first (wrapper format)
+	var pkgSet sraExperimentPackageSet
+	if err := xml.Unmarshal(data, &pkgSet); err == nil && len(pkgSet.Packages) > 0 {
+		return s.extractRecordFromPackage(&pkgSet.Packages[0])
+	}
+
+	// Try parsing as single EXPERIMENT_PACKAGE
 	var pkg sraExperimentPackage
 	if err := xml.Unmarshal(data, &pkg); err != nil {
 		return nil, err
 	}
 
+	return s.extractRecordFromPackage(&pkg)
+}
+
+// extractRecordFromPackage extracts SRARecord from a parsed package.
+func (s *NCBIScraper) extractRecordFromPackage(pkg *sraExperimentPackage) (*models.SRARecord, error) {
 	exp := pkg.Experiment
 	sample := pkg.Sample
 	run := pkg.Run
 
 	record := &models.SRARecord{
 		Accession:       exp.Accession,
+		RunAccession:    run.Accession, // SRR/ERR/DRR - used for download
 		Title:           exp.Title,
 		Platform:        exp.Platform.InstrumentModel,
 		LibraryName:     exp.Design.LibraryDescriptor.LibraryName,
@@ -168,6 +187,7 @@ func (s *NCBIScraper) parseSRARecord(data []byte) (*models.SRARecord, error) {
 		record.TotalReads = run.Statistics.Reads[0].Count
 		record.TotalBases = run.Statistics.Reads[0].Count * int64(run.Statistics.Reads[0].AverageLength)
 		record.AvgLength = run.Statistics.Reads[0].AverageLength
+		record.Spots = run.Statistics.Reads[0].Count
 	}
 
 	return record, nil
@@ -250,6 +270,11 @@ type eSearchResult struct {
 	} `xml:"IdList"`
 	WebEnv   string `xml:"WebEnv"`
 	QueryKey string `xml:"QueryKey"`
+}
+
+type sraExperimentPackageSet struct {
+	XMLName  xml.Name               `xml:"EXPERIMENT_PACKAGE_SET"`
+	Packages []sraExperimentPackage `xml:"EXPERIMENT_PACKAGE"`
 }
 
 type sraExperimentPackage struct {

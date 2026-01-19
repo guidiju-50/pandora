@@ -48,14 +48,22 @@ async function handleSearch() {
   }
 }
 
-// Toggle accession selection
-function toggleAccession(accession) {
-  const idx = selectedAccessions.value.indexOf(accession)
+// Toggle accession selection - use run_accession for downloads
+function toggleAccession(record) {
+  // Use run_accession (SRR) for downloads, fallback to accession (SRX)
+  const acc = record.run_accession || record.accession
+  const idx = selectedAccessions.value.indexOf(acc)
   if (idx === -1) {
-    selectedAccessions.value.push(accession)
+    selectedAccessions.value.push(acc)
   } else {
     selectedAccessions.value.splice(idx, 1)
   }
+}
+
+// Check if a record is selected
+function isSelected(record) {
+  const acc = record.run_accession || record.accession
+  return selectedAccessions.value.includes(acc)
 }
 
 // Add selected to input
@@ -165,18 +173,20 @@ function formatDuration(ns) {
           </div>
           <div 
             v-for="record in searchResults" 
-            :key="record.accession"
+            :key="record.run_accession || record.accession"
             class="search-result-item"
-            :class="{ selected: selectedAccessions.includes(record.accession) }"
-            @click="toggleAccession(record.accession)"
+            :class="{ selected: isSelected(record) }"
+            @click="toggleAccession(record)"
           >
             <div class="result-main">
-              <span class="accession">{{ record.accession }}</span>
+              <span class="accession">{{ record.run_accession || record.accession }}</span>
+              <span v-if="record.run_accession" class="experiment-id">({{ record.accession }})</span>
               <span class="title">{{ record.title || 'No title' }}</span>
             </div>
             <div class="result-meta">
               <span v-if="record.organism">{{ record.organism }}</span>
-              <span v-if="record.spots">{{ record.spots }} reads</span>
+              <span v-if="record.total_reads">{{ record.total_reads.toLocaleString() }} reads</span>
+              <span v-if="record.library_strategy">{{ record.library_strategy }}</span>
             </div>
           </div>
         </div>
@@ -434,6 +444,13 @@ function formatDuration(ns) {
     font-family: var(--font-mono);
     font-weight: 600;
     color: var(--accent-primary);
+  }
+  
+  .experiment-id {
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    margin-left: 0.5rem;
   }
   
   .title {
